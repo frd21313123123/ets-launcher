@@ -1,0 +1,92 @@
+name: Windows build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+  RUST_BACKTRACE: '1'
+  # Ship a portable executable with the MSVC C runtime linked statically.
+  RUSTFLAGS: -C target-feature=+crt-static
+
+jobs:
+  windows:
+    name: Test and package Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.99.1'
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build distribution
+        run: ./scripts/package.ps1 -Target $env:CARGO_BUILD_TARGET
+
+      - name: Verify packaged installation
+        run: ./scripts/smoke-test.ps1
+
+      - name: Calculate checksums
+        run: |
+          $distribution = (Resolve-Path -LiteralPath dist).Path
+          $lines = Get-ChildItem -LiteralPath $distribution -Recurse -File | Sort-Object FullName | ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($distribution, $_.FullName).Replace('\', '/')
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
+          }
+          $lines | Set-Content -LiteralPath (Join-Path $distribution 'SHA256SUMS.txt') -Encoding utf8NoBOM
+
+      - name: Upload Windows application
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ets-launcher-windows-x64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Download instructions
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          @"
+          ## Windows x64 build
+          [Download ETS Launcher]($env:ARTIFACT_URL)
+
+          Unzip the entire archive and run **ets-launcher.exe**.
+          Keep **tools/7zip** next to the executable.
+          Formatting, Clippy, tests and a packaged installation smoke test passed.
+          "@ >> $env:GITHUB_STEP_SUMMARY

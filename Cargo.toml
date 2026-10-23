@@ -1,0 +1,36 @@
+[package]
+name = "ets-launcher"
+version = "0.1.0"
+edition = "2024"
+description = "Native Rust archive downloader prototype for ETS2"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+directories = "6"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+futures-util = "0.3"
+librqbit = "8.1.1"
+open = "5"
+reqwest = { version = "0.12", features = ["stream"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+scraper = { version = "0.24", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "net", "process"] }
+tokio-util = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+sha1 = "0.10"
+
+[profile.release]
+strip = true
+opt-level = 2
+
+[profile.dev]
+debug = 0

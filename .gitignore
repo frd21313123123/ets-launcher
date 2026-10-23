@@ -1,0 +1,6 @@
+/target/
+/dist/
+/.tools/
+/downloads/
+/artifacts/
+*.part
