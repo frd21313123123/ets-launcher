@@ -44,7 +44,9 @@
 
 Workflow **Windows build** запускается при push, pull request и вручную через **Actions → Windows build → Run workflow**. Он проверяет форматирование, Clippy и тесты, собирает Windows x64 на Rust 1.99.1 (MSVC), затем проверяет установку из готового `.exe` на временной папке игры.
 
-Готовое приложение: **Actions → успешный запуск → Artifacts → ets-launcher-windows-x64**. Скачайте ZIP, распакуйте целиком и запустите `ets-launcher.exe`. В комплект входят `tools/7zip`, лицензии и `SHA256SUMS.txt`. Сборки хранятся 30 дней. CI использует тестовые архивы и не скачивает настоящий пакет DLC.
+Готовое приложение: **[Releases](https://github.com/frd21313123123/ets-launcher/releases) → самая новая сборка → ets-launcher-windows-x64.zip**. Скачайте ZIP, распакуйте целиком и запустите `ets-launcher.exe`. В комплект входят `tools/7zip`, лицензии и `SHA256SUMS.txt`. Рядом с ZIP опубликован его SHA256.
+
+Каждый push в `main` и ручной запуск для `main` публикует проверенную сборку как предварительный релиз `build-<commit>`. Повторный запуск того же коммита обновляет только его файлы. Ветки и pull request проходят проверки без публикации. Выдача ZIP через Releases не использует квоту Actions Artifacts. CI работает с тестовыми архивами и не скачивает настоящий пакет DLC.
 
 Для аналогичной сборки из Windows с настроенным MSVC Rust:
 

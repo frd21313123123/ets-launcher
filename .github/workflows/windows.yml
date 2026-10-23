@@ -24,6 +24,8 @@ jobs:
     name: Test and package Windows x64
     runs-on: windows-2022
     timeout-minutes: 45
+    permissions:
+      contents: write
     defaults:
       run:
         shell: pwsh
@@ -69,24 +71,13 @@ jobs:
           }
           $lines | Set-Content -LiteralPath (Join-Path $distribution 'SHA256SUMS.txt') -Encoding utf8NoBOM
 
-      - name: Upload Windows application
-        id: upload
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ets-launcher-windows-x64
-          path: dist/
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Download instructions
-        env:
-          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+      - name: Create portable ZIP
         run: |
-          @"
-          ## Windows x64 build
-          [Download ETS Launcher]($env:ARTIFACT_URL)
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Compress-Archive -Path dist/* -DestinationPath artifacts/ets-launcher-windows-x64.zip -Force
 
-          Unzip the entire archive and run **ets-launcher.exe**.
-          Keep **tools/7zip** next to the executable.
-          Formatting, Clippy, tests and a packaged installation smoke test passed.
-          "@ >> $env:GITHUB_STEP_SUMMARY
+      - name: Publish Windows application
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/publish-release.ps1 -Archive artifacts/ets-launcher-windows-x64.zip
