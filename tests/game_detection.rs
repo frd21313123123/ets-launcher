@@ -1,5 +1,5 @@
 use ets_launcher::{
-    game::{detect_from_paths, is_installation},
+    game::{Game, detect_from_paths, is_installation},
     settings::Settings,
 };
 use std::path::Path;
@@ -43,7 +43,7 @@ fn finds_custom_install_directory_in_a_second_steam_library() {
         ),
     )
     .unwrap();
-    assert_eq!(detect_from_paths(&[steam], &[]), Some(game));
+    assert_eq!(detect_from_paths(Game::Ets2, &[steam], &[]), Some(game));
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn supports_legacy_vdf_comments_and_a_missing_library() {
     installation(&game);
     std::fs::create_dir_all(steam.join("steamapps")).unwrap();
     std::fs::write(steam.join("steamapps/libraryfolders.vdf"), format!("\u{feff}// old Steam format\n\"LibraryFolders\" {{ \"1\" \"Z:\\\\Missing\" \"2\" {} }}", serde_json::to_string(&library).unwrap())).unwrap();
-    assert_eq!(detect_from_paths(&[steam], &[]), Some(game));
+    assert_eq!(detect_from_paths(Game::Ets2, &[steam], &[]), Some(game));
 }
 
 #[test]
@@ -66,9 +66,13 @@ fn ignores_stale_registry_paths_and_rejects_profile_directories() {
     std::fs::write(profile.join("config.cfg"), b"profile").unwrap();
     let game = temp.path().join("Games/Euro Truck Simulator 2");
     installation(&game);
-    assert!(!is_installation(&profile));
+    assert!(!is_installation(Game::Ets2, &profile));
     assert_eq!(
-        detect_from_paths(&[], &[profile, temp.path().join("missing"), game.clone()]),
+        detect_from_paths(
+            Game::Ets2,
+            &[],
+            &[profile, temp.path().join("missing"), game.clone()]
+        ),
         Some(game)
     );
 }
@@ -79,7 +83,7 @@ fn ignores_a_manifest_that_escapes_the_common_directory() {
     let steam = temp.path().join("Steam");
     installation(&steam.join("steamapps/elsewhere"));
     manifest(&steam, "../elsewhere");
-    assert_eq!(detect_from_paths(&[steam], &[]), None);
+    assert_eq!(detect_from_paths(Game::Ets2, &[steam], &[]), None);
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use crate::game::{Channel, Game};
 use crate::{
     archive::{self, Entry},
     download::{self, SharedTransfer, Status},
@@ -14,6 +15,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 pub struct Installation {
+    game: Game,
     root: PathBuf,
     control: PathBuf,
     _lock: File,
@@ -83,17 +85,25 @@ fn unique_id() -> String {
     )
 }
 
-pub fn ensure_game_closed() -> Result<()> {
+pub fn ensure_game_closed(game: Game) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         let system = std::env::var_os("SystemRoot").context("Не найдена папка Windows")?;
         let output =
             std::process::Command::new(PathBuf::from(system).join("System32/tasklist.exe"))
-                .args(["/FI", "IMAGENAME eq eurotrucks2.exe", "/FO", "CSV", "/NH"])
+                .args([
+                    "/FI",
+                    &format!("IMAGENAME eq {}", game.executable()),
+                    "/FO",
+                    "CSV",
+                    "/NH",
+                ])
                 .creation_flags(0x08000000)
                 .output()
-                .context("Не удалось проверить, запущена ли ETS2")?;
+                .with_context(|| {
+                    format!("Не удалось проверить, запущена ли {}", game.short_name())
+                })?;
         ensure!(
             output.status.success(),
             "Не удалось проверить процессы игры"
@@ -101,8 +111,9 @@ pub fn ensure_game_closed() -> Result<()> {
         ensure!(
             !String::from_utf8_lossy(&output.stdout)
                 .to_ascii_lowercase()
-                .contains("\"eurotrucks2.exe\""),
-            "Закройте Euro Truck Simulator 2 перед установкой DLC"
+                .contains(&format!("\"{}\"", game.executable())),
+            "Закройте {} перед установкой DLC",
+            game.name()
         );
     }
     Ok(())
@@ -125,14 +136,16 @@ fn make_directory(path: &Path) -> Result<()> {
     }
 }
 
-pub fn prepare(game: &Path) -> Result<Installation> {
+pub fn prepare(game: Game, directory: &Path) -> Result<Installation> {
     ensure!(
-        crate::game::is_installation(game),
-        "Не найдена ETS2. Укажите папку с bin/win_x64/eurotrucks2.exe."
+        crate::game::is_installation(game, directory),
+        "Не найдена {}. Укажите папку с bin/win_x64/{}.",
+        game.short_name(),
+        game.executable()
     );
-    ensure_game_closed()?;
+    ensure_game_closed(game)?;
     archive::helper()?;
-    let root = fs::canonicalize(game)?;
+    let root = fs::canonicalize(directory)?;
     let control = root.join(".ets-launcher");
     make_directory(&control)?;
     let lock_path = control.join("install.lock");
@@ -154,6 +167,7 @@ pub fn prepare(game: &Path) -> Result<Installation> {
     make_directory(&control.join("backups"))?;
     make_directory(&control.join("work"))?;
     let installation = Installation {
+        game,
         root,
         control,
         _lock: lock,
@@ -457,7 +471,7 @@ impl Installation {
         mut progress: impl FnMut(Event<'_>),
     ) -> Result<Report> {
         cancelled(cancel)?;
-        ensure_game_closed()?;
+        ensure_game_closed(self.game)?;
         let backup = self.control.join("backups").join(unique_id());
         fs::create_dir(&backup)?;
         fs::create_dir(backup.join("original"))?;
@@ -616,14 +630,22 @@ pub async fn install_archive(
     .context("Не удалось завершить установку")?
 }
 
-pub async fn run(output: PathBuf, game: PathBuf, state: SharedTransfer, cancel: CancellationToken) {
+pub async fn run(
+    game: Game,
+    channel: Channel,
+    output: PathBuf,
+    directory: PathBuf,
+    state: SharedTransfer,
+    cancel: CancellationToken,
+) {
     let result: Result<Report> = async {
         download::set_state(&state, |s| {
             s.message = "Проверка игры и предыдущей установки…".into()
         });
-        let installation = tokio::task::spawn_blocking(move || prepare(&game)).await??;
+        let installation = tokio::task::spawn_blocking(move || prepare(game, &directory)).await??;
         cancelled(&cancel)?;
-        let archive = download::download_from_site(false, &output, &state, &cancel).await?;
+        let archive =
+            download::download_from_site(game, channel, false, &output, &state, &cancel).await?;
         install_archive(installation, archive, state.clone(), cancel.clone()).await
     }
     .await;

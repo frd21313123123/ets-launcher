@@ -82,7 +82,7 @@ async fn installs_wrapped_archive_and_preserves_originals_and_game_executable() 
     fake_game(game.path());
     let state = Arc::new(Mutex::new(Transfer::default()));
     let report = install::install_archive(
-        install::prepare(game.path()).unwrap(),
+        install::prepare(ets_launcher::game::Game::Ets2, game.path()).unwrap(),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/installation-test.zip"),
         state,
         CancellationToken::new(),
@@ -138,7 +138,7 @@ async fn damaged_archive_never_changes_the_game() {
     let source = tempfile::tempdir().unwrap();
     write(source.path().join("bad.rar"), b"not an archive");
     let result = install::install_archive(
-        install::prepare(game.path()).unwrap(),
+        install::prepare(ets_launcher::game::Game::Ets2, game.path()).unwrap(),
         source.path().join("bad.rar"),
         Arc::new(Mutex::new(Transfer::default())),
         CancellationToken::new(),
@@ -192,16 +192,13 @@ fn cancellation_after_replacement_rolls_back_and_removes_created_directories() {
     let staging = tempfile::tempdir().unwrap();
     let files = staged_files(staging.path());
     let cancel = CancellationToken::new();
-    let result = install::prepare(game.path()).unwrap().install_files(
-        staging.path(),
-        &files,
-        &cancel,
-        |event| {
+    let result = install::prepare(ets_launcher::game::Game::Ets2, game.path())
+        .unwrap()
+        .install_files(staging.path(), &files, &cancel, |event| {
             if let Event::File { done: 2, .. } = event {
                 cancel.cancel();
             }
-        },
-    );
+        });
     assert!(result.is_err());
     assert_eq!(
         fs::read(game.path().join("dlc_mock.scs")).unwrap(),
@@ -217,16 +214,13 @@ fn file_copy_failure_rolls_back_completed_replacements() {
     fake_game(game.path());
     let staging = tempfile::tempdir().unwrap();
     let files = staged_files(staging.path());
-    let result = install::prepare(game.path()).unwrap().install_files(
-        staging.path(),
-        &files,
-        &CancellationToken::new(),
-        |event| {
+    let result = install::prepare(ets_launcher::game::Game::Ets2, game.path())
+        .unwrap()
+        .install_files(staging.path(), &files, &CancellationToken::new(), |event| {
             if let Event::File { done: 2, .. } = event {
                 fs::remove_file(staging.path().join("bin/win_x86/steam_api.dll")).unwrap();
             }
-        },
-    );
+        });
     assert!(result.is_err());
     assert_eq!(
         fs::read(game.path().join("dlc_mock.scs")).unwrap(),
@@ -240,8 +234,8 @@ fn file_copy_failure_rolls_back_completed_replacements() {
 fn recovers_a_transaction_interrupted_by_process_exit_and_prevents_concurrent_install() {
     let game = tempfile::tempdir().unwrap();
     fake_game(game.path());
-    let installation = install::prepare(game.path()).unwrap();
-    assert!(install::prepare(game.path()).is_err());
+    let installation = install::prepare(ets_launcher::game::Game::Ets2, game.path()).unwrap();
+    assert!(install::prepare(ets_launcher::game::Game::Ets2, game.path()).is_err());
     drop(installation);
     let backup = game.path().join(".ets-launcher/backups/interrupted");
     write(backup.join("original/dlc_mock.scs"), b"original map");
@@ -256,7 +250,7 @@ fn recovers_a_transaction_interrupted_by_process_exit_and_prevents_concurrent_in
         backup.join("transaction.json"),
         serde_json::to_vec(&journal).unwrap(),
     );
-    let _installation = install::prepare(game.path()).unwrap();
+    let _installation = install::prepare(ets_launcher::game::Game::Ets2, game.path()).unwrap();
     assert_eq!(
         fs::read(game.path().join("dlc_mock.scs")).unwrap(),
         b"original map"

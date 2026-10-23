@@ -6,6 +6,7 @@ pub mod playground;
 pub mod settings;
 
 pub const SOURCE_PAGE: &str = "https://www.playground.ru/euro_truck_simulator_2/cheat/ets_2_dlc_unlocker_razblokirovschik_dopolnenij_1_61_1_9s_steam_nicholaspooh-1660372";
+pub const ATS_SOURCE_PAGE: &str = "https://www.playground.ru/american_truck_simulator/cheat/ats_dlc_unlocker_razblokirovschik_dopolnenij_1_61_3_18s_1_62_0_4s_beta_steam_nicholaspooh-1660567";
 pub const BUNDLED_TORRENT: &[u8] = include_bytes!("../assets/ets2-maps.torrent");
 pub const ARCHIVE_NAME: &str = "ETS2_dlc_maps_1.61.1.9s.rar";
 pub const ARCHIVE_SIZE: u64 = 2_487_650_544;

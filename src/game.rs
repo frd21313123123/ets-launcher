@@ -1,44 +1,134 @@
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
-pub const STEAM_APP_ID: u32 = 227_300;
-
-/// A Documents/Euro Truck Simulator 2 profile directory is not a game installation.
-pub fn is_installation(path: &Path) -> bool {
-    [
-        "bin/win_x64/eurotrucks2.exe",
-        "bin/win_x86/eurotrucks2.exe",
-        "bin/linux_x64/eurotrucks2",
-    ]
-    .iter()
-    .any(|exe| path.join(exe).is_file())
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Game {
+    #[default]
+    Ets2,
+    Ats,
 }
 
-pub fn detect(saved: Option<&Path>) -> Option<PathBuf> {
-    if let Some(saved) = saved.filter(|path| is_installation(path)) {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    #[default]
+    Stable,
+    Beta,
+}
+
+impl std::str::FromStr for Game {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "ets2" => Ok(Self::Ets2),
+            "ats" => Ok(Self::Ats),
+            _ => anyhow::bail!("Укажите игру: ets2 или ats"),
+        }
+    }
+}
+
+impl std::str::FromStr for Channel {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "stable" => Ok(Self::Stable),
+            "beta" => Ok(Self::Beta),
+            _ => anyhow::bail!("Укажите ветку: stable или beta"),
+        }
+    }
+}
+
+impl Game {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ets2 => "Euro Truck Simulator 2",
+            Self::Ats => "American Truck Simulator",
+        }
+    }
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Self::Ets2 => "ETS2",
+            Self::Ats => "ATS",
+        }
+    }
+    pub fn steam_app_id(self) -> u32 {
+        match self {
+            Self::Ets2 => 227_300,
+            Self::Ats => 270_880,
+        }
+    }
+    pub fn executable(self) -> &'static str {
+        match self {
+            Self::Ets2 => "eurotrucks2.exe",
+            Self::Ats => "amtrucks.exe",
+        }
+    }
+    pub fn source_page(self) -> &'static str {
+        match self {
+            Self::Ets2 => crate::SOURCE_PAGE,
+            Self::Ats => crate::ATS_SOURCE_PAGE,
+        }
+    }
+    pub fn validate_archive(self, channel: Channel, name: &str) -> anyhow::Result<()> {
+        let name = name.to_ascii_lowercase();
+        let prefix = match self {
+            Self::Ets2 => "ets2_dlc_",
+            Self::Ats => "ats_dlc_",
+        };
+        anyhow::ensure!(
+            self == Self::Ats || channel == Channel::Stable,
+            "Beta-ветка доступна только для ATS"
+        );
+        anyhow::ensure!(
+            name.starts_with(prefix) && name.ends_with(".rar"),
+            "Сайт вернул архив для другой игры: {name}"
+        );
+        anyhow::ensure!(
+            name.contains("beta") == (channel == Channel::Beta),
+            "Архив не соответствует выбранной ветке игры"
+        );
+        Ok(())
+    }
+}
+
+/// A Documents/Euro Truck Simulator 2 profile directory is not a game installation.
+pub fn is_installation(game: Game, path: &Path) -> bool {
+    ["bin/win_x64", "bin/win_x86"]
+        .iter()
+        .any(|directory| path.join(directory).join(game.executable()).is_file())
+}
+
+pub fn detect(game: Game, saved: Option<&Path>) -> Option<PathBuf> {
+    if let Some(saved) = saved.filter(|path| is_installation(game, path)) {
         return Some(saved.to_path_buf());
     }
     // Manifests and libraryfolders.vdf take priority over stale uninstall records.
-    let (steam_roots, installed_games) = platform_paths();
-    detect_from_paths(&steam_roots, &installed_games).map(|path| path.components().collect())
+    let (steam_roots, installed_games) = platform_paths(game);
+    detect_from_paths(game, &steam_roots, &installed_games).map(|path| path.components().collect())
 }
 
-pub fn detect_from_paths(steam_roots: &[PathBuf], game_paths: &[PathBuf]) -> Option<PathBuf> {
+pub fn detect_from_paths(
+    game: Game,
+    steam_roots: &[PathBuf],
+    game_paths: &[PathBuf],
+) -> Option<PathBuf> {
     for root in steam_roots {
-        if let Some(path) = find_in_steam(root) {
+        if let Some(path) = find_in_steam(game, root) {
             return Some(path);
         }
-        let standard = root.join("steamapps/common/Euro Truck Simulator 2");
-        if is_installation(&standard) {
+        let standard = root.join("steamapps/common").join(game.name());
+        if is_installation(game, &standard) {
             return Some(standard);
         }
     }
     game_paths
         .iter()
-        .find(|path| is_installation(path))
+        .find(|path| is_installation(game, path))
         .cloned()
 }
 
-fn find_in_steam(root: &Path) -> Option<PathBuf> {
+fn find_in_steam(game: Game, root: &Path) -> Option<PathBuf> {
     let mut libraries = vec![root.to_path_buf()];
     for file in ["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
         if let Some(vdf) = read_vdf(&root.join(file))
@@ -58,11 +148,11 @@ fn find_in_steam(root: &Path) -> Option<PathBuf> {
             }
         }
     }
+    let app_id = game.steam_app_id().to_string();
     for library in libraries {
-        if let Some(vdf) =
-            read_vdf(&library.join(format!("steamapps/appmanifest_{STEAM_APP_ID}.acf")))
+        if let Some(vdf) = read_vdf(&library.join(format!("steamapps/appmanifest_{app_id}.acf")))
             && let Some(app) = vdf.object("AppState")
-            && app.text("appid") == Some("227300")
+            && app.text("appid") == Some(app_id.as_str())
             && let Some(directory) = app.text("installdir")
         {
             let relative = Path::new(directory);
@@ -71,13 +161,13 @@ fn find_in_steam(root: &Path) -> Option<PathBuf> {
                 .all(|part| matches!(part, Component::Normal(_)))
             {
                 let path = library.join("steamapps/common").join(relative);
-                if is_installation(&path) {
+                if is_installation(game, &path) {
                     return Some(path);
                 }
             }
         }
-        let standard = library.join("steamapps/common/Euro Truck Simulator 2");
-        if is_installation(&standard) {
+        let standard = library.join("steamapps/common").join(game.name());
+        if is_installation(game, &standard) {
             return Some(standard);
         }
     }
@@ -205,7 +295,7 @@ fn parse_entries(tokens: &[Token], position: &mut usize, depth: usize) -> Option
     (depth == 0).then_some(Vdf(entries))
 }
 
-fn platform_paths() -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn platform_paths(game: Game) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut steam = Vec::new();
     let mut games = Vec::new();
     #[cfg(windows)]
@@ -229,7 +319,7 @@ fn platform_paths() -> (Vec<PathBuf>, Vec<PathBuf>) {
             "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
         ] {
             if let Ok(value) = LOCAL_MACHINE
-                .open(format!("{prefix}\\Steam App {STEAM_APP_ID}"))
+                .open(format!("{prefix}\\Steam App {}", game.steam_app_id()))
                 .and_then(|key| key.get_string("InstallLocation"))
             {
                 games.push(value.into());
@@ -245,7 +335,7 @@ fn platform_paths() -> (Vec<PathBuf>, Vec<PathBuf>) {
             for suffix in ["Steam", "SteamLibrary", "SteamLibrary/steam", "Games/Steam"] {
                 steam.push(PathBuf::from(format!("{drive}:/{suffix}")));
             }
-            for suffix in ["Games/Euro Truck Simulator 2", "Euro Truck Simulator 2"] {
+            for suffix in [format!("Games/{}", game.name()), game.name().to_owned()] {
                 games.push(PathBuf::from(format!("{drive}:/{suffix}")));
             }
         }

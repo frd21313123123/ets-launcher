@@ -92,7 +92,7 @@ async fn downloads_then_extracts_and_installs_a_torrent_into_a_temporary_game() 
     seed.stop().await;
     result.expect("torrent transfer timed out").unwrap();
     let report = install::install_archive(
-        install::prepare(game.path()).unwrap(),
+        install::prepare(ets_launcher::game::Game::Ets2, game.path()).unwrap(),
         download_dir.path().join("test-archive.zip"),
         state,
         cancel,

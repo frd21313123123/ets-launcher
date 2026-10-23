@@ -4,7 +4,9 @@ use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use ets_launcher::{
     SOURCE_PAGE,
     download::{self, SharedTransfer, Source, Status, Transfer},
-    format_bytes, game, install,
+    format_bytes, game,
+    game::{Channel, Game},
+    install,
     settings::Settings,
 };
 use std::{
@@ -26,13 +28,13 @@ fn main() -> anyhow::Result<()> {
     // Headless diagnostic: always requires an explicitly supplied archive and game directory.
     if args.get(1).is_some_and(|arg| arg == "--install-archive") {
         anyhow::ensure!(
-            args.len() == 5,
-            "--install-archive <archive> <game directory> <report file>"
+            matches!(args.len(), 5 | 6),
+            "--install-archive <archive> <game directory> <report file> [ets2|ats]"
         );
         let state = Arc::new(Mutex::new(Transfer::default()));
         let result = Runtime::new()?.block_on(async {
             install::install_archive(
-                install::prepare(std::path::Path::new(&args[3]))?,
+                install::prepare(cli_game(&args, 5)?, std::path::Path::new(&args[3]))?,
                 PathBuf::from(&args[2]),
                 state,
                 CancellationToken::new(),
@@ -60,7 +62,15 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(&output)?;
         let state = Arc::new(Mutex::new(Transfer::default()));
         Runtime::new()?.block_on(download::run(
-            Source::Playground { torrent_only: true },
+            Source::Playground {
+                game: cli_game(&args, 3)?,
+                channel: args
+                    .get(4)
+                    .map(|value| value.parse())
+                    .transpose()?
+                    .unwrap_or_default(),
+                torrent_only: true,
+            },
             output.clone(),
             state.clone(),
             CancellationToken::new(),
@@ -93,7 +103,7 @@ fn main() -> anyhow::Result<()> {
         }
         std::fs::write(
             output,
-            game::detect(None)
+            game::detect(cli_game(&args, 3)?, None)
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "NOT_FOUND".into()),
         )?;
@@ -155,14 +165,14 @@ fn main() -> anyhow::Result<()> {
     let runtime = Runtime::new()?;
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([840.0, 640.0])
-            .with_min_inner_size([720.0, 540.0])
-            .with_title("ETS Launcher"),
+            .with_inner_size([840.0, 720.0])
+            .with_min_inner_size([720.0, 580.0])
+            .with_title("ETS & ATS Launcher"),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(
-        "ETS Launcher",
+        "ETS & ATS Launcher",
         native_options,
         Box::new(move |cc| {
             configure(&cc.egui_ctx);
@@ -180,6 +190,13 @@ fn main() -> anyhow::Result<()> {
         }),
     )
     .map_err(|error| anyhow::anyhow!("Не удалось открыть окно: {error}"))
+}
+
+fn cli_game(args: &[String], index: usize) -> anyhow::Result<Game> {
+    args.get(index)
+        .map(|value| value.parse())
+        .transpose()
+        .map(|game| game.unwrap_or_default())
 }
 
 fn configure(ctx: &egui::Context) {
@@ -224,30 +241,33 @@ struct Launcher {
     cancel: CancellationToken,
     close_when_idle: bool,
     note: Option<String>,
-    game_search: Option<mpsc::Receiver<Option<PathBuf>>>,
+    game_search: Option<mpsc::Receiver<(Game, Option<PathBuf>)>>,
 }
 
 impl Launcher {
     fn search_game(&mut self, ctx: &egui::Context, use_saved: bool) {
         let (sender, receiver) = mpsc::channel();
         self.game_search = Some(receiver);
+        let game = self.settings.selected_game;
         let saved = if use_saved {
-            self.settings.game_dir.clone()
+            self.settings
+                .directory(game)
+                .map(std::path::Path::to_path_buf)
         } else {
             None
         };
         let ctx = ctx.clone();
         self.runtime.as_ref().unwrap().spawn_blocking(move || {
-            let _ = sender.send(game::detect(saved.as_deref()));
+            let _ = sender.send((game, game::detect(game, saved.as_deref())));
             ctx.request_repaint();
         });
     }
 
     fn poll_game_search(&mut self) {
         match self.game_search.as_ref().map(|rx| rx.try_recv()) {
-            Some(Ok(path)) => {
+            Some(Ok((game, path))) => {
                 self.game_search = None;
-                self.settings.game_dir = path;
+                self.settings.set_directory(game, path);
                 if let Err(error) = self.settings.save() {
                     self.note = Some(error.to_string());
                 }
@@ -264,8 +284,16 @@ impl Launcher {
         if download::snapshot(&self.state).active() {
             return;
         }
-        let Some(game) = self.settings.game_dir.clone() else {
-            self.note = Some("Не найдена ETS2. Укажите папку игры в настройках.".into());
+        let game = self.settings.selected_game;
+        let Some(directory) = self
+            .settings
+            .directory(game)
+            .map(std::path::Path::to_path_buf)
+        else {
+            self.note = Some(format!(
+                "Не найдена {}. Укажите папку игры в настройках.",
+                game.short_name()
+            ));
             return;
         };
         self.note = None;
@@ -273,7 +301,7 @@ impl Launcher {
         download::set_state(&self.state, |s| {
             *s = Transfer {
                 status: Status::Connecting,
-                name: "DLC Maps".into(),
+                name: format!("{} DLC Maps", game.short_name()),
                 message: "Подготовка к установке…".into(),
                 ..Default::default()
             }
@@ -282,8 +310,10 @@ impl Launcher {
             self.note = Some(error.to_string());
         }
         self.runtime.as_ref().unwrap().spawn(install::run(
-            self.settings.output.clone(),
             game,
+            self.settings.channel(),
+            self.settings.download_directory(game),
+            directory,
             self.state.clone(),
             self.cancel.clone(),
         ));
@@ -319,14 +349,72 @@ impl eframe::App for Launcher {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("ETS").size(28.0).strong().color(GREEN));
+                        ui.label(RichText::new("TRUCK").size(28.0).strong().color(GREEN));
                         ui.label(RichText::new("LAUNCHER").size(16.0).strong());
                     });
-                    ui.label(RichText::new("Euro Truck Simulator 2").color(MUTED));
+                    let previous = self.settings.selected_game;
+                    let mut selected = previous;
+                    ui.add_enabled_ui(!busy, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut selected,
+                                Game::Ets2,
+                                "Euro Truck Simulator 2",
+                            );
+                            ui.selectable_value(
+                                &mut selected,
+                                Game::Ats,
+                                "American Truck Simulator",
+                            );
+                        });
+                    });
+                    if selected != previous {
+                        self.settings.selected_game = selected;
+                        self.note = None;
+                        download::set_state(&self.state, |s| *s = Transfer::default());
+                        self.search_game(ctx, true);
+                        if let Err(error) = self.settings.save() {
+                            self.note = Some(error.to_string());
+                        }
+                    }
+                    if selected == Game::Ats {
+                        let previous_channel = self.settings.ats_channel;
+                        ui.add_enabled_ui(!busy, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Ветка ATS:").size(12.0).color(MUTED));
+                                ui.selectable_value(
+                                    &mut self.settings.ats_channel,
+                                    Channel::Stable,
+                                    "Обычная",
+                                );
+                                ui.selectable_value(
+                                    &mut self.settings.ats_channel,
+                                    Channel::Beta,
+                                    "Beta",
+                                );
+                            });
+                        });
+                        ui.label(
+                            RichText::new("Выберите ту же ветку, что установлена в Steam.")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                        if previous_channel != self.settings.ats_channel {
+                            self.note = None;
+                            download::set_state(&self.state, |s| *s = Transfer::default());
+                            if let Err(error) = self.settings.save() {
+                                self.note = Some(error.to_string());
+                            }
+                        }
+                    }
                     ui.add_space(16.0);
                     card().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
-                        ui.label(RichText::new("DLC Maps").size(34.0).strong());
+                        ui.label(
+                            RichText::new(format!("{} · DLC Maps", selected.short_name()))
+                                .size(34.0)
+                                .strong(),
+                        );
                         ui.label(
                             RichText::new("Скачивание и установка дополнений одной кнопкой")
                                 .color(MUTED),
@@ -336,11 +424,13 @@ impl eframe::App for Launcher {
                             "Поиск игры…".into()
                         } else {
                             self.settings
-                                .game_dir
-                                .as_ref()
-                                .map(|p| format!("ETS2: {}", p.display()))
+                                .directory(selected)
+                                .map(|p| format!("{}: {}", selected.short_name(), p.display()))
                                 .unwrap_or_else(|| {
-                                    "ETS2 не найдена — выберите папку в настройках".into()
+                                    format!(
+                                        "{} не найдена — выберите папку в настройках",
+                                        selected.short_name()
+                                    )
                                 })
                         };
                         ui.add(
@@ -360,7 +450,7 @@ impl eframe::App for Launcher {
                         if ui
                             .add_enabled(
                                 !busy
-                                    && self.settings.game_dir.is_some()
+                                    && self.settings.directory(selected).is_some()
                                     && self.game_search.is_none(),
                                 button,
                             )
@@ -458,18 +548,24 @@ impl eframe::App for Launcher {
                     ui.add_enabled_ui(!busy, |ui| {
                         egui::CollapsingHeader::new("Настройки").show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                if ui.button("Выбрать папку ETS2").clicked()
+                                if ui
+                                    .button(format!("Выбрать папку {}", selected.short_name()))
+                                    .clicked()
                                     && let Some(folder) = rfd::FileDialog::new()
-                                        .set_title("Папка Euro Truck Simulator 2")
+                                        .set_title(format!("Папка {}", selected.name()))
                                         .pick_folder()
                                 {
-                                    if game::is_installation(&folder) {
+                                    if game::is_installation(selected, &folder) {
                                         self.game_search = None;
-                                        self.settings.game_dir = Some(folder);
+                                        self.settings.set_directory(selected, Some(folder));
+                                        if let Err(error) = self.settings.save() {
+                                            self.note = Some(error.to_string());
+                                        }
                                     } else {
-                                        self.note = Some(
-                                            "В папке не найден bin/win_x64/eurotrucks2.exe.".into(),
-                                        );
+                                        self.note = Some(format!(
+                                            "В папке не найден bin/win_x64/{}.",
+                                            selected.executable()
+                                        ));
                                     }
                                 }
                                 if ui
@@ -485,7 +581,7 @@ impl eframe::App for Launcher {
                             ui.label(
                                 RichText::new(format!(
                                     "Кэш загрузок: {}",
-                                    self.settings.output.display()
+                                    self.settings.download_directory(selected).display()
                                 ))
                                 .size(12.0)
                                 .color(MUTED),
@@ -496,9 +592,9 @@ impl eframe::App for Launcher {
                                     .pick_folder()
                             {
                                 self.settings.output = folder;
-                            }
-                            if let Err(error) = self.settings.save() {
-                                self.note = Some(error.to_string());
+                                if let Err(error) = self.settings.save() {
+                                    self.note = Some(error.to_string());
+                                }
                             }
                             ui.label(
                                 RichText::new(
@@ -516,7 +612,7 @@ impl eframe::App for Launcher {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Источник:").size(11.0).color(MUTED));
                         if ui.small_button("PlayGround ↗").clicked()
-                            && let Err(error) = open::that(SOURCE_PAGE)
+                            && let Err(error) = open::that(selected.source_page())
                         {
                             self.note = Some(error.to_string());
                         }

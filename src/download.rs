@@ -1,3 +1,4 @@
+use crate::game::{Channel, Game};
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use librqbit::{AddTorrent, AddTorrentOptions, Session, SessionOptions};
@@ -94,7 +95,11 @@ pub enum Source {
     TorrentBytes(Vec<u8>),
     Magnet(String),
     TestArchive,
-    Playground { torrent_only: bool },
+    Playground {
+        game: Game,
+        channel: Channel,
+        torrent_only: bool,
+    },
 }
 
 pub async fn run(
@@ -103,11 +108,19 @@ pub async fn run(
     state: SharedTransfer,
     cancel: CancellationToken,
 ) {
-    let torrent_only = matches!(&source, Source::Playground { torrent_only: true });
-    let result = match source {
-        Source::Playground { torrent_only } => {
-            download_from_site(torrent_only, &output, &state, &cancel).await
+    let torrent_only = matches!(
+        &source,
+        Source::Playground {
+            torrent_only: true,
+            ..
         }
+    );
+    let result = match source {
+        Source::Playground {
+            game,
+            channel,
+            torrent_only,
+        } => download_from_site(game, channel, torrent_only, &output, &state, &cancel).await,
         Source::TestArchive => {
             download_http(
                 crate::TEST_URL,
@@ -150,15 +163,22 @@ pub async fn run(
 }
 
 pub async fn download_from_site(
+    game: Game,
+    channel: Channel,
     torrent_only: bool,
     output: &Path,
     state: &SharedTransfer,
     cancel: &CancellationToken,
 ) -> Result<PathBuf> {
     set_state(state, |s| s.message = "Чтение страницы PlayGround…".into());
-    let fetched = crate::playground::fetch_torrent(
+    anyhow::ensure!(
+        game == Game::Ats || channel == Channel::Stable,
+        "Beta-ветка доступна только для ATS"
+    );
+    let fetched = crate::playground::fetch_torrent_for(
         &crate::playground::client()?,
-        crate::SOURCE_PAGE,
+        game.source_page(),
+        channel,
         cancel,
         |remaining| {
             set_state(state, |s| {
@@ -171,6 +191,7 @@ pub async fn download_from_site(
         },
     )
     .await?;
+    game.validate_archive(channel, &fetched.archive_name)?;
     ensure_not_cancelled(cancel)?;
     let torrent_name = format!("{}.torrent", fetched.archive_name);
     let path = save_bytes(output, &torrent_name, &fetched.bytes, cancel).await?;

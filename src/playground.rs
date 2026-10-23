@@ -1,3 +1,4 @@
+use crate::game::Channel;
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
@@ -35,6 +36,10 @@ pub fn client() -> Result<Client> {
 }
 
 pub fn find_file(html: &str) -> Result<FileDescriptor> {
+    find_file_for(html, Channel::Stable)
+}
+
+pub fn find_file_for(html: &str, channel: Channel) -> Result<FileDescriptor> {
     let html = Html::parse_document(html);
     let article_selector = Selector::parse("main#post-item[data-post-id]").unwrap();
     let file_selector =
@@ -53,16 +58,26 @@ pub fn find_file(html: &str) -> Result<FileDescriptor> {
     let files: Vec<_> = article
         .select(&file_selector)
         .filter(|file| {
-            !file
+            let subfile = file
                 .value()
                 .attr("data-is-subfile")
-                .is_some_and(|value| !value.is_empty() && value != "0")
+                .is_some_and(|value| !value.is_empty() && value != "0");
+            match channel {
+                Channel::Stable => !subfile,
+                Channel::Beta => {
+                    subfile
+                        && file
+                            .value()
+                            .attr("data-name")
+                            .is_some_and(|name| name.to_ascii_lowercase().contains("beta"))
+                }
+            }
         })
         .filter(|file| file.value().attr("data-deleted") != Some("1"))
         .collect();
     ensure!(
         files.len() == 1,
-        "На странице должен быть один основной файл с торрентом; найдено: {}",
+        "На странице должен быть один торрент для выбранной ветки; найдено: {}",
         files.len()
     );
     let file = files[0].value();
@@ -106,10 +121,23 @@ pub async fn fetch_torrent(
     cancel: &CancellationToken,
     on_wait: impl Fn(u64),
 ) -> Result<FetchedTorrent> {
+    fetch_torrent_for(client, page_url, Channel::Stable, cancel, on_wait).await
+}
+
+pub async fn fetch_torrent_for(
+    client: &Client,
+    page_url: &str,
+    channel: Channel,
+    cancel: &CancellationToken,
+    on_wait: impl Fn(u64),
+) -> Result<FetchedTorrent> {
     let page = request(client.get(page_url), cancel).await
         .context("Не удалось открыть PlayGround. Проверьте доступ к сайту или обход VPN для ets-launcher.exe")?;
     let html = bounded_body(page, MAX_PAGE, cancel).await?;
-    let file = find_file(std::str::from_utf8(&html).context("Страница не в UTF-8")?)?;
+    let file = find_file_for(
+        std::str::from_utf8(&html).context("Страница не в UTF-8")?,
+        channel,
+    )?;
     let api_url = Url::parse(page_url)?.join("/api/file.download")?;
     let mut lock_hash: Option<String> = None;
     for _ in 0..3 {
