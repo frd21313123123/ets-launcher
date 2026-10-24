@@ -12,6 +12,7 @@ $releaseDirectory = if ($Target) { Join-Path $projectRoot "target\$Target\releas
 Copy-Item -LiteralPath (Join-Path $releaseDirectory 'ets-launcher.exe') -Destination $distribution
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $distribution
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $distribution
+Copy-Item -LiteralPath (Join-Path $projectRoot 'assets\branding\icon.ico') -Destination (Join-Path $distribution 'ets-launcher.ico')
 $archiveTools = Join-Path $distribution 'tools\7zip'
 New-Item -ItemType Directory -Path $archiveTools -Force | Out-Null
 foreach ($assetName in @('7z.exe', '7z.dll', 'License.txt', 'LGPL-2.1.txt', 'ORIGIN.md')) {

@@ -184,11 +184,15 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let runtime = Runtime::new()?;
+    let app_icon = Arc::new(eframe::icon_data::from_png_bytes(include_bytes!(
+        "../assets/branding/icon.png"
+    ))?);
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([880.0, 820.0])
             .with_min_inner_size([760.0, 620.0])
-            .with_title("ETS & ATS Launcher"),
+            .with_title("ETS & ATS Launcher")
+            .with_icon(app_icon.clone()),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -197,6 +201,14 @@ fn main() -> anyhow::Result<()> {
         native_options,
         Box::new(move |cc| {
             configure(&cc.egui_ctx);
+            let logo = cc.egui_ctx.load_texture(
+                "truck-launcher-logo",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [app_icon.width as usize, app_icon.height as usize],
+                    &app_icon.rgba,
+                ),
+                egui::TextureOptions::LINEAR,
+            );
             let settings = Settings::load();
             let cache = CatalogCache::load();
             let catalogs = std::array::from_fn(|index| {
@@ -218,6 +230,7 @@ fn main() -> anyhow::Result<()> {
                 catalog_sender,
                 catalog_receiver,
                 source_editor,
+                logo,
             };
             launcher.search_game(&cc.egui_ctx, true);
             for game in Game::ALL {
@@ -272,6 +285,7 @@ fn configure(ctx: &egui::Context) {
 }
 
 struct Launcher {
+    logo: egui::TextureHandle,
     runtime: Option<Runtime>,
     settings: Settings,
     state: SharedTransfer,
@@ -472,6 +486,7 @@ impl eframe::App for Launcher {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(42.0)));
                         ui.label(RichText::new("TRUCK").size(28.0).strong().color(GREEN));
                         ui.label(RichText::new("LAUNCHER").size(16.0).strong());
                     });

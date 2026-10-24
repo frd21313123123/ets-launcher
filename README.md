@@ -1,5 +1,7 @@
 # ETS & ATS Launcher — установщик на Rust
 
+<img src="assets/branding/icon.png" width="80" height="80" alt="Логотип Truck Launcher">
+
 [![Windows build](https://github.com/frd21313123123/ets-launcher/actions/workflows/windows.yml/badge.svg)](https://github.com/frd21313123123/ets-launcher/actions/workflows/windows.yml)
 
 Нативное приложение Windows для Euro Truck Simulator 2 и American Truck Simulator: `egui/eframe`, встроенный BitTorrent-клиент `librqbit`, HTTPS через `reqwest` и комплектный распаковщик 7-Zip. Отдельный торрент-клиент или архиватор не нужен.
@@ -47,6 +49,8 @@
 ```
 
 `package.ps1` собирает `dist`: лаунчер, требуемые GNU DLL, папку `tools/7zip` с официальными `7z.exe`, `7z.dll` и лицензиями. Переносить нужно всю папку `dist`. Источник и контрольные суммы 7-Zip приведены в `assets/7zip/ORIGIN.md`.
+
+Логотип встроен в `.exe` как иконка Windows и используется в окне приложения. Отдельная копия `ets-launcher.ico` входит в `dist` для ярлыков. Исходник и промпт находятся в `assets/branding`; размеры иконки пересоздаются скриптом `scripts/make-icons.ps1`.
 
 Для системного GNU нужны инструменты MinGW/LLVM, для MSVC — соответствующие Build Tools. Обёртка `scripts/cargo.ps1` настраивает локальные LLVM dlltool и LLD.
 
