@@ -11,6 +11,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod bundled;
+
 const MAX_FILES: usize = 30_000;
 const MAX_EXPANDED: u64 = 50 * 1024 * 1024 * 1024;
 
@@ -22,20 +24,7 @@ pub struct Entry {
 }
 
 pub fn helper() -> Result<PathBuf> {
-    let packaged = std::env::current_exe()?
-        .parent()
-        .unwrap()
-        .join("tools/7zip/7z.exe");
-    if packaged.is_file() && packaged.with_file_name("7z.dll").is_file() {
-        return Ok(packaged);
-    }
-    // Development builds use the same unmodified helper as the distribution.
-    let development = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/7zip/7z.exe");
-    ensure!(
-        development.is_file() && development.with_file_name("7z.dll").is_file(),
-        "Не найден распаковщик. Запустите приложение из полной папки dist с tools/7zip."
-    );
-    Ok(development)
+    bundled::helper()
 }
 
 /// Apply Windows path rules even when validating on another platform.

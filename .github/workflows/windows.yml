@@ -60,24 +60,13 @@ jobs:
         run: ./scripts/package.ps1 -Target $env:CARGO_BUILD_TARGET
 
       - name: Verify packaged installation
-        run: ./scripts/smoke-test.ps1
+        run: ./scripts/smoke-test.ps1 -Standalone
 
-      - name: Calculate checksums
-        run: |
-          $distribution = (Resolve-Path -LiteralPath dist).Path
-          $lines = Get-ChildItem -LiteralPath $distribution -Recurse -File | Sort-Object FullName | ForEach-Object {
-            $relative = [IO.Path]::GetRelativePath($distribution, $_.FullName).Replace('\', '/')
-            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
-          }
-          $lines | Set-Content -LiteralPath (Join-Path $distribution 'SHA256SUMS.txt') -Encoding utf8NoBOM
-
-      - name: Create portable ZIP
-        run: |
-          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
-          Compress-Archive -Path dist/* -DestinationPath artifacts/ets-launcher-windows-x64.zip -Force
+      - name: Verify standalone runtime dependencies
+        run: ./scripts/verify-standalone.ps1 -Executable dist/ets-launcher.exe
 
       - name: Publish Windows application
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/publish-release.ps1 -Archive artifacts/ets-launcher-windows-x64.zip
+        run: ./scripts/publish-release.ps1 -Executable dist/ets-launcher.exe
