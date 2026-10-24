@@ -3,16 +3,17 @@
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use ets_launcher::{
     SOURCE_PAGE,
+    catalog::{CatalogCache, CatalogState, REFRESH_INTERVAL, RETRY_INTERVAL},
     download::{self, SharedTransfer, Source, Status, Transfer},
     format_bytes, game,
     game::{Channel, Game},
-    install,
+    install, playground,
     settings::Settings,
 };
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +26,25 @@ const GREEN: Color32 = Color32::from_rgb(104, 224, 164);
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--catalog") {
+        let game = cli_game(&args, 3)?;
+        let output = args
+            .get(2)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "artifacts/catalog.json".into());
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let settings = Settings::load();
+        let catalog = Runtime::new()?.block_on(playground::fetch_catalog(
+            &playground::client()?,
+            settings.source(game),
+            &CancellationToken::new(),
+        ))?;
+        catalog.validate_for(game)?;
+        std::fs::write(output, serde_json::to_vec_pretty(&catalog)?)?;
+        return Ok(());
+    }
     // Headless diagnostic: always requires an explicitly supplied archive and game directory.
     if args.get(1).is_some_and(|arg| arg == "--install-archive") {
         anyhow::ensure!(
@@ -69,6 +89,7 @@ fn main() -> anyhow::Result<()> {
                     .map(|value| value.parse())
                     .transpose()?
                     .unwrap_or_default(),
+                page_url: Settings::load().source(cli_game(&args, 3)?).to_owned(),
                 torrent_only: true,
             },
             output.clone(),
@@ -165,8 +186,8 @@ fn main() -> anyhow::Result<()> {
     let runtime = Runtime::new()?;
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([840.0, 720.0])
-            .with_min_inner_size([720.0, 580.0])
+            .with_inner_size([880.0, 820.0])
+            .with_min_inner_size([760.0, 620.0])
             .with_title("ETS & ATS Launcher"),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
@@ -176,16 +197,32 @@ fn main() -> anyhow::Result<()> {
         native_options,
         Box::new(move |cc| {
             configure(&cc.egui_ctx);
+            let settings = Settings::load();
+            let cache = CatalogCache::load();
+            let catalogs = std::array::from_fn(|index| {
+                let game = Game::ALL[index];
+                CatalogState::new(cache.get(game, settings.source(game)))
+            });
+            let source_editor = settings.source(settings.selected_game).to_owned();
+            let (catalog_sender, catalog_receiver) = mpsc::channel();
             let mut launcher = Launcher {
                 runtime: Some(runtime),
-                settings: Settings::load(),
+                settings,
                 state: Arc::new(Mutex::new(Transfer::default())),
                 cancel: CancellationToken::new(),
                 close_when_idle: false,
                 note: None,
                 game_search: None,
+                cache,
+                catalogs,
+                catalog_sender,
+                catalog_receiver,
+                source_editor,
             };
             launcher.search_game(&cc.egui_ctx, true);
+            for game in Game::ALL {
+                launcher.refresh_catalog(&cc.egui_ctx, game, true);
+            }
             Ok(Box::new(launcher))
         }),
     )
@@ -242,9 +279,87 @@ struct Launcher {
     close_when_idle: bool,
     note: Option<String>,
     game_search: Option<mpsc::Receiver<(Game, Option<PathBuf>)>>,
+    cache: CatalogCache,
+    catalogs: [CatalogState; 2],
+    catalog_sender: mpsc::Sender<CatalogUpdate>,
+    catalog_receiver: mpsc::Receiver<CatalogUpdate>,
+    source_editor: String,
+}
+
+struct CatalogUpdate {
+    game: Game,
+    source: String,
+    generation: u64,
+    result: Result<playground::Catalog, String>,
 }
 
 impl Launcher {
+    fn refresh_catalog(&mut self, ctx: &egui::Context, game: Game, force: bool) {
+        let state = &mut self.catalogs[game.index()];
+        if !force && (state.refreshing || Instant::now() < state.next_refresh) {
+            return;
+        }
+        let source = self.settings.source(game).to_owned();
+        if state
+            .catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.source_url != source)
+        {
+            state.catalog = None;
+        }
+        state.cancel.cancel();
+        state.cancel = CancellationToken::new();
+        state.generation = state.generation.wrapping_add(1);
+        state.refreshing = true;
+        let cancel = state.cancel.clone();
+        let generation = state.generation;
+        let sender = self.catalog_sender.clone();
+        let ctx = ctx.clone();
+        self.runtime.as_ref().unwrap().spawn(async move {
+            let result: anyhow::Result<_> = async {
+                let client = playground::client()?;
+                let catalog = playground::fetch_catalog(&client, &source, &cancel).await?;
+                catalog.validate_for(game)?;
+                Ok(catalog)
+            }
+            .await;
+            let _ = sender.send(CatalogUpdate {
+                game,
+                source,
+                generation,
+                result: result.map_err(|e| format!("{e:#}")),
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_catalogs(&mut self) {
+        for update in self.catalog_receiver.try_iter() {
+            let state = &mut self.catalogs[update.game.index()];
+            if update.generation != state.generation
+                || update.source != self.settings.source(update.game)
+            {
+                continue;
+            }
+            state.refreshing = false;
+            match update.result {
+                Ok(catalog) => {
+                    state.error = None;
+                    state.catalog = Some(catalog.clone());
+                    state.next_refresh = Instant::now() + REFRESH_INTERVAL;
+                    self.cache.set(update.game, catalog);
+                    if let Err(error) = self.cache.save() {
+                        self.note = Some(format!("Не удалось сохранить данные источника: {error}"));
+                    }
+                }
+                Err(error) => {
+                    state.error = Some(error);
+                    state.next_refresh = Instant::now() + RETRY_INTERVAL;
+                }
+            }
+        }
+    }
+
     fn search_game(&mut self, ctx: &egui::Context, use_saved: bool) {
         let (sender, receiver) = mpsc::channel();
         self.game_search = Some(receiver);
@@ -312,6 +427,7 @@ impl Launcher {
         self.runtime.as_ref().unwrap().spawn(install::run(
             game,
             self.settings.channel(),
+            self.settings.source(game).to_owned(),
             self.settings.download_directory(game),
             directory,
             self.state.clone(),
@@ -331,8 +447,15 @@ fn card() -> egui::Frame {
 impl eframe::App for Launcher {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_game_search();
+        self.poll_catalogs();
         let transfer = download::snapshot(&self.state);
         let busy = transfer.active();
+        if !busy {
+            for game in Game::ALL {
+                self.refresh_catalog(ctx, game, false);
+            }
+        }
+        ctx.request_repaint_after(Duration::from_secs(1));
         if ctx.input(|i| i.viewport().close_requested()) && busy {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_when_idle = true;
@@ -371,27 +494,27 @@ impl eframe::App for Launcher {
                     if selected != previous {
                         self.settings.selected_game = selected;
                         self.note = None;
+                        self.source_editor = self.settings.source(selected).to_owned();
                         download::set_state(&self.state, |s| *s = Transfer::default());
                         self.search_game(ctx, true);
                         if let Err(error) = self.settings.save() {
                             self.note = Some(error.to_string());
                         }
                     }
-                    if selected == Game::Ats {
-                        let previous_channel = self.settings.ats_channel;
+                    let catalog = self.catalogs[selected.index()].catalog.clone();
+                    let refreshing = self.catalogs[selected.index()].refreshing;
+                    let catalog_error = self.catalogs[selected.index()].error.clone();
+                    if catalog.as_ref().is_some_and(|c| c.select(Channel::Beta).is_ok()) || self.settings.channel() == Channel::Beta {
+                        let previous_channel = self.settings.channel();
+                        let mut channel = previous_channel;
                         ui.add_enabled_ui(!busy, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Ветка ATS:").size(12.0).color(MUTED));
-                                ui.selectable_value(
-                                    &mut self.settings.ats_channel,
-                                    Channel::Stable,
-                                    "Обычная",
-                                );
-                                ui.selectable_value(
-                                    &mut self.settings.ats_channel,
-                                    Channel::Beta,
-                                    "Beta",
-                                );
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new("Ветка:").size(12.0).color(MUTED));
+                                for (value, name) in [(Channel::Stable, "Обычная"), (Channel::Beta, "Beta")] {
+                                    let release = catalog.as_ref().and_then(|c| c.select(value).ok());
+                                    let label = release.and_then(|r| r.version.as_ref()).map(|version| format!("{name} · {version}")).unwrap_or_else(|| format!("{name} · недоступна"));
+                                    ui.add_enabled_ui(release.is_some(), |ui| { ui.selectable_value(&mut channel, value, label); });
+                                }
                             });
                         });
                         ui.label(
@@ -399,7 +522,8 @@ impl eframe::App for Launcher {
                                 .size(11.0)
                                 .color(MUTED),
                         );
-                        if previous_channel != self.settings.ats_channel {
+                        if previous_channel != channel {
+                            self.settings.set_channel(selected, channel);
                             self.note = None;
                             download::set_state(&self.state, |s| *s = Transfer::default());
                             if let Err(error) = self.settings.save() {
@@ -407,6 +531,7 @@ impl eframe::App for Launcher {
                             }
                         }
                     }
+                    let release = catalog.as_ref().and_then(|c| c.select(self.settings.channel()).ok());
                     ui.add_space(16.0);
                     card().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -415,6 +540,24 @@ impl eframe::App for Launcher {
                                 .size(34.0)
                                 .strong(),
                         );
+                        if let Some(release) = release {
+                            ui.label(RichText::new(format!("Версия на источнике: {}", release.version.as_deref().unwrap_or("не указана"))).color(GREEN));
+                            ui.add(egui::Label::new(RichText::new(format!("{} · {}", release.file.name, release.size_label.as_deref().unwrap_or("размер уточнится при загрузке"))).size(12.0).color(MUTED)).wrap());
+                        } else {
+                            ui.label(RichText::new(if refreshing { "Проверяем актуальные файлы PlayGround…" } else { "Для выбранной ветки нет доступного архива" }).color(MUTED));
+                        }
+                        ui.horizontal(|ui| {
+                            if refreshing { ui.spinner(); }
+                            let stamp = catalog.as_ref().map(|c| {
+                                let age = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().saturating_sub(c.checked_at);
+                                if age < 60 { "Данные обновлены только что".into() } else { format!("Данные проверены {} мин назад", age / 60) }
+                            }).unwrap_or_else(|| "Нет сохранённых данных".into());
+                            ui.label(RichText::new(stamp).size(11.0).color(MUTED));
+                            if ui.add_enabled(!busy && !refreshing, egui::Button::new("Обновить данные")).clicked() { self.refresh_catalog(ctx, selected, true); }
+                        });
+                        if let Some(error) = &catalog_error {
+                            ui.add(egui::Label::new(RichText::new(format!("Не удалось обновить: {error}{}", if catalog.is_some() { ". Показаны сохранённые данные; перед установкой источник будет проверен заново." } else { "" })).size(11.0).color(Color32::from_rgb(255,184,120))).wrap());
+                        }
                         ui.label(
                             RichText::new("Скачивание и установка дополнений одной кнопкой")
                                 .color(MUTED),
@@ -450,6 +593,7 @@ impl eframe::App for Launcher {
                         if ui
                             .add_enabled(
                                 !busy
+                                    && release.is_some()
                                     && self.settings.directory(selected).is_some()
                                     && self.game_search.is_none(),
                                 button,
@@ -523,6 +667,7 @@ impl eframe::App for Launcher {
                         } else {
                             transfer.message.as_str()
                         };
+                        if busy && !transfer.name.is_empty() { ui.add(egui::Label::new(RichText::new(&transfer.name).size(12.0).color(MUTED)).wrap()); }
                         ui.add(
                             egui::Label::new(RichText::new(message).size(12.0).color(MUTED)).wrap(),
                         );
@@ -586,6 +731,26 @@ impl eframe::App for Launcher {
                                 .size(12.0)
                                 .color(MUTED),
                             );
+                            ui.label(RichText::new("Страница источника PlayGround").size(12.0).color(MUTED));
+                            ui.add(egui::TextEdit::singleline(&mut self.source_editor).desired_width(ui.available_width()));
+                            ui.horizontal(|ui| {
+                                if ui.button("Применить ссылку").clicked() {
+                                    match self.settings.set_source(selected, &self.source_editor) {
+                                        Ok(()) => {
+                                            self.note = self.settings.save().err().map(|e| e.to_string());
+                                            self.source_editor = self.settings.source(selected).to_owned();
+                                            self.refresh_catalog(ctx, selected, true);
+                                        },
+                                        Err(error) => self.note = Some(error.to_string()),
+                                    }
+                                }
+                                if ui.button("Сбросить ссылку").clicked() {
+                                    let _ = self.settings.set_source(selected, "");
+                                    self.source_editor = self.settings.source(selected).to_owned();
+                                    self.note = self.settings.save().err().map(|e| e.to_string());
+                                    self.refresh_catalog(ctx, selected, true);
+                                }
+                            });
                             if ui.button("Изменить папку загрузки").clicked()
                                 && let Some(folder) = rfd::FileDialog::new()
                                     .set_directory(&self.settings.output)
@@ -612,7 +777,7 @@ impl eframe::App for Launcher {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Источник:").size(11.0).color(MUTED));
                         if ui.small_button("PlayGround ↗").clicked()
-                            && let Err(error) = open::that(selected.source_page())
+                            && let Err(error) = open::that(self.settings.source(selected))
                         {
                             self.note = Some(error.to_string());
                         }
@@ -630,6 +795,9 @@ impl eframe::App for Launcher {
 impl Drop for Launcher {
     fn drop(&mut self) {
         self.cancel.cancel();
+        for state in &self.catalogs {
+            state.cancel.cancel();
+        }
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_timeout(Duration::from_secs(3));
         }

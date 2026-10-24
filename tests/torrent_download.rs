@@ -1,3 +1,5 @@
+#[path = "fixtures/ets2.rs"]
+mod ets2_fixture;
 use ets_launcher::download::{self, Source, Status, Transfer, transfer_in_session};
 use librqbit::{AddTorrent, AddTorrentOptions, Session, SessionOptions};
 use sha1::{Digest, Sha1};
@@ -126,13 +128,13 @@ fn options(listen: bool) -> SessionOptions {
 }
 
 #[test]
-fn bundled_torrent_matches_the_archive_shown_in_the_window() {
+fn fixture_torrent_matches_its_archive_metadata() {
     let torrent: librqbit::TorrentMetaV1<librqbit::ByteBuf<'_>> =
-        librqbit::torrent_from_bytes(ets_launcher::BUNDLED_TORRENT).unwrap();
-    assert_eq!(torrent.info.length, Some(ets_launcher::ARCHIVE_SIZE));
+        librqbit::torrent_from_bytes(ets2_fixture::BUNDLED_TORRENT).unwrap();
+    assert_eq!(torrent.info.length, Some(ets2_fixture::ARCHIVE_SIZE));
     assert_eq!(
         torrent.info.name.as_ref().unwrap().as_ref(),
-        ets_launcher::ARCHIVE_NAME.as_bytes()
+        ets2_fixture::ARCHIVE_NAME.as_bytes()
     );
     assert!(torrent.info.files.is_none());
 }

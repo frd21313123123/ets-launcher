@@ -1,9 +1,11 @@
+#[path = "fixtures/ets2.rs"]
+mod ets2_fixture;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ets_launcher::{
-    ARCHIVE_NAME, ARCHIVE_SIZE, BUNDLED_TORRENT,
     download::save_bytes,
     playground::{client, fetch_torrent, find_file, validate_torrent},
 };
+use ets2_fixture::{ARCHIVE_NAME, ARCHIVE_SIZE, BUNDLED_TORRENT};
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},

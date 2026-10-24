@@ -98,6 +98,7 @@ pub enum Source {
     Playground {
         game: Game,
         channel: Channel,
+        page_url: String,
         torrent_only: bool,
     },
 }
@@ -119,8 +120,20 @@ pub async fn run(
         Source::Playground {
             game,
             channel,
+            page_url,
             torrent_only,
-        } => download_from_site(game, channel, torrent_only, &output, &state, &cancel).await,
+        } => {
+            download_from_site(
+                game,
+                channel,
+                &page_url,
+                torrent_only,
+                &output,
+                &state,
+                &cancel,
+            )
+            .await
+        }
         Source::TestArchive => {
             download_http(
                 crate::TEST_URL,
@@ -165,19 +178,16 @@ pub async fn run(
 pub async fn download_from_site(
     game: Game,
     channel: Channel,
+    page_url: &str,
     torrent_only: bool,
     output: &Path,
     state: &SharedTransfer,
     cancel: &CancellationToken,
 ) -> Result<PathBuf> {
     set_state(state, |s| s.message = "Чтение страницы PlayGround…".into());
-    anyhow::ensure!(
-        game == Game::Ats || channel == Channel::Stable,
-        "Beta-ветка доступна только для ATS"
-    );
     let fetched = crate::playground::fetch_torrent_for(
         &crate::playground::client()?,
-        game.source_page(),
+        page_url,
         channel,
         cancel,
         |remaining| {
@@ -191,7 +201,7 @@ pub async fn download_from_site(
         },
     )
     .await?;
-    game.validate_archive(channel, &fetched.archive_name)?;
+    game.validate_archive(&fetched.archive_name)?;
     ensure_not_cancelled(cancel)?;
     let torrent_name = format!("{}.torrent", fetched.archive_name);
     let path = save_bytes(output, &torrent_name, &fetched.bytes, cancel).await?;

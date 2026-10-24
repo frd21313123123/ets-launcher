@@ -14,6 +14,12 @@ pub struct Settings {
     pub selected_game: Game,
     #[serde(default)]
     pub ats_channel: Channel,
+    #[serde(default)]
+    pub ets2_channel: Channel,
+    #[serde(default)]
+    pub ets2_source: Option<String>,
+    #[serde(default)]
+    pub ats_source: Option<String>,
 }
 
 impl Default for Settings {
@@ -23,6 +29,9 @@ impl Default for Settings {
             ats_dir: None,
             selected_game: Game::Ets2,
             ats_channel: Channel::Stable,
+            ets2_channel: Channel::Stable,
+            ets2_source: None,
+            ats_source: None,
             output: UserDirs::new()
                 .and_then(|dirs| dirs.download_dir().map(|dir| dir.join("ETS Launcher")))
                 .unwrap_or_else(|| PathBuf::from("downloads")),
@@ -47,9 +56,61 @@ impl Settings {
 
     pub fn channel(&self) -> Channel {
         match self.selected_game {
-            Game::Ets2 => Channel::Stable,
+            Game::Ets2 => self.ets2_channel,
             Game::Ats => self.ats_channel,
         }
+    }
+
+    pub fn set_channel(&mut self, game: Game, channel: Channel) {
+        match game {
+            Game::Ets2 => self.ets2_channel = channel,
+            Game::Ats => self.ats_channel = channel,
+        }
+    }
+
+    pub fn source(&self, game: Game) -> &str {
+        let source = match game {
+            Game::Ets2 => &self.ets2_source,
+            Game::Ats => &self.ats_source,
+        };
+        source
+            .as_deref()
+            .filter(|url| Self::validate_source(game, url).is_ok())
+            .unwrap_or(game.source_page())
+    }
+
+    pub fn validate_source(game: Game, value: &str) -> anyhow::Result<()> {
+        let url = reqwest::Url::parse(value)?;
+        let category = match game {
+            Game::Ets2 => "/euro_truck_simulator_2/cheat/",
+            Game::Ats => "/american_truck_simulator/cheat/",
+        };
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && matches!(url.host_str(), Some("www.playground.ru" | "playground.ru"))
+                && url.port().is_none()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path().starts_with(category),
+            "Укажите HTTPS-ссылку PlayGround на публикацию для {}",
+            game.short_name()
+        );
+        Ok(())
+    }
+
+    pub fn set_source(&mut self, game: Game, value: &str) -> anyhow::Result<()> {
+        let value = value.trim();
+        let source = if value.is_empty() {
+            None
+        } else {
+            Self::validate_source(game, value)?;
+            Some(value.to_owned())
+        };
+        match game {
+            Game::Ets2 => self.ets2_source = source,
+            Game::Ats => self.ats_source = source,
+        }
+        Ok(())
     }
 
     pub fn download_directory(&self, game: Game) -> PathBuf {
@@ -59,7 +120,7 @@ impl Settings {
         }
     }
 
-    fn path() -> Option<PathBuf> {
+    pub(crate) fn path() -> Option<PathBuf> {
         ProjectDirs::from("", "ETS Launcher", "ETS Launcher")
             .map(|dirs| dirs.config_dir().join("settings.json"))
     }

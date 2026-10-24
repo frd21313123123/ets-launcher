@@ -633,6 +633,7 @@ pub async fn install_archive(
 pub async fn run(
     game: Game,
     channel: Channel,
+    page_url: String,
     output: PathBuf,
     directory: PathBuf,
     state: SharedTransfer,
@@ -645,7 +646,8 @@ pub async fn run(
         let installation = tokio::task::spawn_blocking(move || prepare(game, &directory)).await??;
         cancelled(&cancel)?;
         let archive =
-            download::download_from_site(game, channel, false, &output, &state, &cancel).await?;
+            download::download_from_site(game, channel, &page_url, false, &output, &state, &cancel)
+                .await?;
         install_archive(installation, archive, state.clone(), cancel.clone()).await
     }
     .await;

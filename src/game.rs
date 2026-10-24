@@ -40,6 +40,14 @@ impl std::str::FromStr for Channel {
 }
 
 impl Game {
+    pub const ALL: [Self; 2] = [Self::Ets2, Self::Ats];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Ets2 => 0,
+            Self::Ats => 1,
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             Self::Ets2 => "Euro Truck Simulator 2",
@@ -70,23 +78,18 @@ impl Game {
             Self::Ats => crate::ATS_SOURCE_PAGE,
         }
     }
-    pub fn validate_archive(self, channel: Channel, name: &str) -> anyhow::Result<()> {
+    pub fn validate_archive(self, name: &str) -> anyhow::Result<()> {
         let name = name.to_ascii_lowercase();
         let prefix = match self {
             Self::Ets2 => "ets2_dlc_",
             Self::Ats => "ats_dlc_",
         };
         anyhow::ensure!(
-            self == Self::Ats || channel == Channel::Stable,
-            "Beta-ветка доступна только для ATS"
-        );
-        anyhow::ensure!(
-            name.starts_with(prefix) && name.ends_with(".rar"),
+            name.starts_with(prefix)
+                && [".rar", ".zip", ".7z"]
+                    .iter()
+                    .any(|extension| name.ends_with(extension)),
             "Сайт вернул архив для другой игры: {name}"
-        );
-        anyhow::ensure!(
-            name.contains("beta") == (channel == Channel::Beta),
-            "Архив не соответствует выбранной ветке игры"
         );
         Ok(())
     }

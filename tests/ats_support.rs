@@ -128,36 +128,9 @@ fn chooses_stable_or_beta_ats_download_and_rejects_cross_game_archives() {
     assert_eq!(stable.post_id, 1660567);
     assert_eq!(stable.file_id, 442139);
     assert_eq!(beta.file_id, 443254);
-    assert!(
-        Game::Ats
-            .validate_archive(Channel::Stable, &stable.name)
-            .is_ok()
-    );
-    assert!(
-        Game::Ats
-            .validate_archive(Channel::Beta, &beta.name)
-            .is_ok()
-    );
-    assert!(
-        Game::Ets2
-            .validate_archive(Channel::Stable, &stable.name)
-            .is_err()
-    );
-    assert!(
-        Game::Ats
-            .validate_archive(Channel::Stable, &beta.name)
-            .is_err()
-    );
-    assert!(
-        Game::Ats
-            .validate_archive(Channel::Beta, &stable.name)
-            .is_err()
-    );
-    assert!(
-        Game::Ets2
-            .validate_archive(Channel::Beta, "ETS2_dlc_beta.rar")
-            .is_err()
-    );
+    assert!(Game::Ats.validate_archive(&stable.name).is_ok());
+    assert!(Game::Ats.validate_archive(&beta.name).is_ok());
+    assert!(Game::Ets2.validate_archive(&stable.name).is_err());
     assert!(
         playground::find_file_for(
             &ATS_PAGE.replace("ATS_dlc_maps_1.62.0.4s_BETA.rar", "other.rar"),
@@ -222,9 +195,7 @@ async fn requests_the_matching_ats_torrent_from_the_website_api() {
         .unwrap();
         server.await.unwrap();
         assert_eq!(fetched.bytes, bytes);
-        Game::Ats
-            .validate_archive(channel, &fetched.archive_name)
-            .unwrap();
+        Game::Ats.validate_archive(&fetched.archive_name).unwrap();
     }
 }
 
