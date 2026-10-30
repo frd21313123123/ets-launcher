@@ -26,6 +26,16 @@ pub struct Settings {
     pub mod_catalog_source: Option<String>,
     #[serde(default)]
     pub quper_library: Option<PathBuf>,
+    #[serde(default)]
+    pub theme: Theme,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    Black,
+    Light,
 }
 
 impl Default for Settings {
@@ -41,6 +51,7 @@ impl Default for Settings {
             mod_library: None,
             mod_catalog_source: None,
             quper_library: None,
+            theme: Theme::Black,
             output: UserDirs::new()
                 .and_then(|dirs| dirs.download_dir().map(|dir| dir.join("ETS Launcher")))
                 .unwrap_or_else(|| PathBuf::from("downloads")),

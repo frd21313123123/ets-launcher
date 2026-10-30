@@ -124,6 +124,29 @@ impl Library {
         Ok(state)
     }
 
+    /// Progress of a release that was already started, without creating any folders:
+    /// `(ready mods, environment ready)`, or `None` when nothing was downloaded yet.
+    pub fn progress(&self, plan: &Plan) -> Result<Option<(usize, bool)>> {
+        let combo = &plan.combo;
+        combo.validate()?;
+        let release = self
+            .root
+            .join(&combo.id)
+            .join(key(&format!("{}-{}", combo.game_version, combo.version)));
+        if !release.join("packages").is_dir() {
+            return Ok(None);
+        }
+        let missing = self.missing(plan)?.len();
+        // Opening a build creates its folders; that alone is not a download.
+        if missing == plan.order.len() {
+            return Ok(None);
+        }
+        Ok(Some((
+            plan.order.len().saturating_sub(missing),
+            missing == 0 && self.ready_home(plan)?.is_some(),
+        )))
+    }
+
     pub fn missing(&self, plan: &Plan) -> Result<Vec<String>> {
         let release = self.release(&plan.combo)?;
         let state = self.state(&plan.combo)?;

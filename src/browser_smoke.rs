@@ -75,7 +75,8 @@ fn run_entry(
             ..Default::default()
         },
         Box::new(move |cc| {
-            crate::configure(&cc.egui_ctx);
+            crate::ui::install_fonts(&cc.egui_ctx);
+            crate::ui::apply_theme(&cc.egui_ctx, &crate::ui::BLACK);
             Ok(Box::new(app))
         }),
     )
