@@ -131,6 +131,26 @@ pub fn detect_from_paths(
         .cloned()
 }
 
+/// Use Steam only when its manifest resolves to the installation selected by
+/// the user. Never substitute a different Steam copy for a manually chosen game.
+pub fn steam_client_from_paths(
+    game: Game,
+    installation: &Path,
+    roots: &[PathBuf],
+) -> Option<PathBuf> {
+    let selected = installation.canonicalize().ok()?;
+    roots.iter().find_map(|root| {
+        let installed = find_in_steam(game, root)?.canonicalize().ok()?;
+        let client = root.join("steam.exe");
+        (installed == selected && client.is_file()).then_some(client)
+    })
+}
+
+pub fn steam_client(game: Game, installation: &Path) -> Option<PathBuf> {
+    let (roots, _) = platform_paths(game);
+    steam_client_from_paths(game, installation, &roots)
+}
+
 fn find_in_steam(game: Game, root: &Path) -> Option<PathBuf> {
     let mut libraries = vec![root.to_path_buf()];
     for file in ["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {

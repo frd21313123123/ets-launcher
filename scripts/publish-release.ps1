@@ -12,6 +12,11 @@ if (-not $env:GH_TOKEN) { throw 'GH_TOKEN is required for publishing a build.' }
 Get-Command gh -ErrorAction Stop | Out-Null
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 if ([IO.Path]::GetFileName($Executable) -ne 'ets-launcher.exe') { throw 'Expected ets-launcher.exe.' }
+$bundle = Join-Path (Split-Path -Parent $Executable) 'ets-launcher-windows-x64.zip'
+if (-not (Test-Path -LiteralPath $bundle -PathType Leaf)) { throw 'Distribution ZIP is missing.' }
+$bundleChecksumPath = $bundle + '.sha256'
+$bundleChecksum = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
+('{0}  {1}' -f $bundleChecksum, [IO.Path]::GetFileName($bundle)) | Set-Content -LiteralPath $bundleChecksumPath -Encoding utf8NoBOM
 $checksumPath = $Executable + '.sha256'
 $checksum = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.ToLowerInvariant()
 ('{0}  {1}' -f $checksum, [IO.Path]::GetFileName($Executable)) | Set-Content -LiteralPath $checksumPath -Encoding utf8NoBOM
@@ -23,6 +28,7 @@ Automated Windows x64 build from commit $Commit.
 Download and run **ets-launcher.exe**. This is the complete Windows x64 application.
 No ZIP extraction, Rust, Visual C++ Redistributable, torrent client or separately installed archiver is required.
 The executable contains 7-Zip and its licenses; they are prepared automatically in the user's local application cache when needed.
+Ready-made ETS2 and ATS combos, cover images and file lists are loaded from qupersimulator.ru. Boosty sources are excluded. The ZIP contains the application and documentation; no separate map catalog is required. The embedded browser requires Microsoft WebView2 Runtime.
 
 Formatting, Clippy, all tests, installation from an isolated EXE with an empty cache, and the system-DLL dependency check passed.
 "@ | Set-Content -LiteralPath $notesPath -Encoding utf8NoBOM
@@ -30,9 +36,9 @@ Formatting, Clippy, all tests, installation from an isolated EXE with an empty c
 # Each commit has its own release; rerunning the same commit updates only its assets.
 & gh release view $tag --repo $Repository --json url --jq .url 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) {
-    & gh release upload $tag $Executable $checksumPath --repo $Repository --clobber | Out-Null
+    & gh release upload $tag $Executable $checksumPath $bundle $bundleChecksumPath --repo $Repository --clobber | Out-Null
 } else {
-    & gh release create $tag $Executable $checksumPath --repo $Repository --target $Commit --prerelease --title "Windows build #$BuildNumber" --notes-file $notesPath | Out-Null
+    & gh release create $tag $Executable $checksumPath $bundle $bundleChecksumPath --repo $Repository --target $Commit --prerelease --title "Windows build #$BuildNumber" --notes-file $notesPath | Out-Null
 }
 if ($LASTEXITCODE -ne 0) { throw 'Failed to publish the Windows executable.' }
 $releaseUrl = & gh release view $tag --repo $Repository --json url --jq .url

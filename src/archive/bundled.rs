@@ -23,6 +23,10 @@ const FILES: &[(&str, &[u8])] = &[
     ),
     ("ORIGIN.md", include_bytes!("../../assets/7zip/ORIGIN.md")),
     ("Launcher-LICENSE.txt", include_bytes!("../../LICENSE")),
+    (
+        "Map-Manager-LICENSES.txt",
+        include_bytes!("../../assets/licenses/map-manager.txt"),
+    ),
 ];
 
 fn bundle_id() -> &'static str {

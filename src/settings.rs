@@ -20,6 +20,12 @@ pub struct Settings {
     pub ets2_source: Option<String>,
     #[serde(default)]
     pub ats_source: Option<String>,
+    #[serde(default)]
+    pub mod_library: Option<PathBuf>,
+    #[serde(default)]
+    pub mod_catalog_source: Option<String>,
+    #[serde(default)]
+    pub quper_library: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -32,6 +38,9 @@ impl Default for Settings {
             ets2_channel: Channel::Stable,
             ets2_source: None,
             ats_source: None,
+            mod_library: None,
+            mod_catalog_source: None,
+            quper_library: None,
             output: UserDirs::new()
                 .and_then(|dirs| dirs.download_dir().map(|dir| dir.join("ETS Launcher")))
                 .unwrap_or_else(|| PathBuf::from("downloads")),
@@ -121,6 +130,9 @@ impl Settings {
     }
 
     pub(crate) fn path() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("ETS_LAUNCHER_CONFIG_DIR").map(PathBuf::from) {
+            return path.is_absolute().then(|| path.join("settings.json"));
+        }
         ProjectDirs::from("", "ETS Launcher", "ETS Launcher")
             .map(|dirs| dirs.config_dir().join("settings.json"))
     }

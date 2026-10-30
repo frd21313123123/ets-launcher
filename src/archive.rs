@@ -235,6 +235,24 @@ pub async fn inspect(archive: &Path, cancel: &CancellationToken) -> Result<Vec<E
     parse_listing(&listing)
 }
 
+/// Verify CRC without extracting the mod's own resource archive.
+pub async fn test(archive: &Path, cancel: &CancellationToken) -> Result<()> {
+    invoke(
+        &helper()?,
+        &[
+            "t".into(),
+            "-bso0".into(),
+            "-bsp0".into(),
+            "-p".into(),
+            "--".into(),
+            archive.canonicalize()?.into_os_string(),
+        ],
+        cancel,
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn extract(
     archive: &Path,
     destination: &Path,

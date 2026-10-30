@@ -1,0 +1,1025 @@
+{
+  "schema": 1,
+  "maps": [
+    {
+      "id": "promods-europe",
+      "name": "ProMods Europe",
+      "region": "Европа",
+      "author": "ProMods Team",
+      "description": "Расширение карты от ProMods. Бесплатная загрузка и генерация DEF доступны на сайте проекта.",
+      "source": {
+        "kind": "promods",
+        "url": "https://store.promods.net/en-ch/collections/downloads",
+        "selector": "a[href*='/products/promods-europe-']",
+        "version_pattern": "(?i)ProMods(?: Europe)?\\s+([0-9]+(?:\\.[0-9a-z]+)+)",
+        "browser_url": "https://promods.net/setup.php",
+        "game_pattern": "(?i)designed for the\\s*(1\\.\\d{2})\\s*patch",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "2.84",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^promods.*assets.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*model1.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*model2.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*model3.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*media.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*map.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*def.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*dlcsupport.*\\.(scs|zip)$",
+            "optional": true
+          }
+        ]
+      },
+      "dependencies": [],
+      "after": [],
+      "coverage": {
+        "summary": "Новые регионы Европы и переработка существующей карты. На схеме показаны основные зоны, а не точная сеть дорог.",
+        "source": "https://store.promods.net/en-ch/collections/downloads",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "ISL",
+            "bounds": null,
+            "rework": false
+          },
+          {
+            "country": "IRL",
+            "bounds": null,
+            "rework": false
+          },
+          {
+            "country": "UKR",
+            "bounds": [
+              22,
+              47,
+              30,
+              52
+            ],
+            "rework": false
+          },
+          {
+            "country": "GBR",
+            "bounds": null,
+            "rework": true
+          },
+          {
+            "country": "NOR",
+            "bounds": null,
+            "rework": true
+          },
+          {
+            "country": "SWE",
+            "bounds": null,
+            "rework": true
+          },
+          {
+            "country": "FIN",
+            "bounds": null,
+            "rework": true
+          },
+          {
+            "country": "POL",
+            "bounds": null,
+            "rework": true
+          },
+          {
+            "country": "DEU",
+            "bounds": null,
+            "rework": true
+          },
+          {
+            "country": "DNK",
+            "bounds": null,
+            "rework": true
+          }
+        ]
+      },
+      "require_verified_connections": true,
+      "compatibility_family": "promods"
+    },
+    {
+      "id": "promods-middle-east",
+      "name": "ProMods Middle East",
+      "region": "Ближний Восток",
+      "author": "ProMods Team",
+      "description": "Расширение карты от ProMods. Бесплатная загрузка и генерация DEF доступны на сайте проекта.",
+      "source": {
+        "kind": "promods",
+        "url": "https://store.promods.net/en-ch/collections/downloads",
+        "selector": "a[href*='/products/promods-middle-east-']",
+        "version_pattern": "(?i)Middle East\\s+([0-9]+(?:\\.[0-9a-z]+)+)",
+        "browser_url": "https://promods.net/setup.php",
+        "game_pattern": "(?i)designed for the\\s*(1\\.\\d{2})\\s*patch",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "2.84",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^promods.*me.*assets.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*me.*defmap.*\\.scs$"
+          }
+        ]
+      },
+      "dependencies": [
+        "promods-europe"
+      ],
+      "after": [
+        "promods-europe"
+      ],
+      "coverage": {
+        "summary": "Восточное Средиземноморье и Ближний Восток; часть стран представлена отдельными коридорами.",
+        "source": "https://store.promods.net/en-ch/collections/downloads",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "CYP",
+            "bounds": null,
+            "rework": false
+          },
+          {
+            "country": "LBN",
+            "bounds": null,
+            "rework": false
+          },
+          {
+            "country": "ISR",
+            "bounds": null,
+            "rework": false
+          },
+          {
+            "country": "PSX",
+            "bounds": null,
+            "rework": false
+          },
+          {
+            "country": "JOR",
+            "bounds": null,
+            "rework": false
+          },
+          {
+            "country": "SYR",
+            "bounds": [
+              35,
+              32,
+              38,
+              37
+            ],
+            "rework": false
+          },
+          {
+            "country": "EGY",
+            "bounds": [
+              29,
+              29,
+              35,
+              32
+            ],
+            "rework": false
+          }
+        ]
+      },
+      "require_verified_connections": true,
+      "compatibility_family": "promods"
+    },
+    {
+      "id": "promods-great-steppe",
+      "name": "ProMods The Great Steppe",
+      "region": "Казахстан",
+      "author": "ProMods Team",
+      "description": "Расширение карты от ProMods. Бесплатная загрузка и генерация DEF доступны на сайте проекта.",
+      "source": {
+        "kind": "promods",
+        "url": "https://store.promods.net/en-ch/collections/downloads",
+        "selector": "a[href*='/products/promods-the-great-steppe-']",
+        "version_pattern": "(?i)Great Steppe\\s+([0-9]+(?:\\.[0-9a-z]+)+)",
+        "browser_url": "https://promods.net/setup.php",
+        "game_pattern": "(?i)designed for the\\s*(1\\.\\d{2})\\s*patch",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "1.7.0",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^promods.*tgs.*assets.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*tgs.*defmap.*\\.scs$"
+          }
+        ]
+      },
+      "dependencies": [
+        "promods-europe"
+      ],
+      "after": [],
+      "coverage": {
+        "summary": "Запад Казахстана, приграничные районы и каспийское побережье Центральной Азии.",
+        "source": "https://store.promods.net/en-ch/collections/downloads",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "KAZ",
+            "bounds": [
+              46,
+              41,
+              64,
+              55
+            ],
+            "rework": false
+          },
+          {
+            "country": "TKM",
+            "bounds": [
+              52,
+              39,
+              55,
+              43
+            ],
+            "rework": false
+          },
+          {
+            "country": "UZB",
+            "bounds": [
+              55,
+              42,
+              60,
+              46
+            ],
+            "rework": false
+          },
+          {
+            "country": "RUS",
+            "bounds": [
+              46,
+              50,
+              50,
+              53
+            ],
+            "rework": false
+          }
+        ]
+      },
+      "require_verified_connections": true,
+      "compatibility_family": "promods",
+      "before": [
+        "promods-europe"
+      ]
+    },
+    {
+      "id": "promods-maghreb",
+      "name": "ProMods Maghreb",
+      "region": "Северная Африка",
+      "author": "ProMods Team",
+      "description": "Расширение карты от ProMods. Бесплатная загрузка и генерация DEF доступны на сайте проекта.",
+      "source": {
+        "kind": "promods",
+        "url": "https://store.promods.net/en-ch/collections/downloads",
+        "selector": "a[href*='/products/promods-maghreb-']",
+        "version_pattern": "(?i)Maghreb\\s+([0-9]+(?:\\.[0-9a-z]+)+)",
+        "browser_url": "https://promods.net/setup.php",
+        "game_pattern": "(?i)designed for the\\s*(1\\.\\d{2})\\s*patch",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "1.0.4",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^promods.*maghreb.*assets.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^promods.*maghreb.*defmap.*\\.scs$"
+          }
+        ]
+      },
+      "dependencies": [
+        "promods-europe"
+      ],
+      "after": [
+        "promods-europe"
+      ],
+      "coverage": {
+        "summary": "Регионы Марокко и Туниса; отдельные города и дороги, а не вся территория стран.",
+        "source": "https://store.promods.net/en-ch/collections/downloads",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "MAR",
+            "bounds": [
+              -10,
+              30,
+              -1,
+              36
+            ],
+            "rework": false
+          },
+          {
+            "country": "TUN",
+            "bounds": [
+              8,
+              33,
+              12,
+              38
+            ],
+            "rework": false
+          }
+        ]
+      },
+      "require_verified_connections": true,
+      "compatibility_family": "promods"
+    },
+    {
+      "id": "rusmap",
+      "name": "RusMap",
+      "region": "Россия и Беларусь",
+      "author": "aldimator / RusMap Team",
+      "description": "Европейская часть России и Беларусь. Для сочетания с ProMods требуется подходящий коннектор.",
+      "source": {
+        "kind": "scs_forum",
+        "url": "https://forum.scssoft.com/viewtopic.php?t=332124",
+        "selector": ".postbody",
+        "version_pattern": "(?i)(?:RusMap[_\\s]*v?\\.?|SibirMap\\s+)([0-9]+(?:\\.[0-9a-z]+)+)",
+        "stop_before": "Old versions:",
+        "date_pattern": "(?i)UPD:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "requirements_pattern": "(?i)(?:Game version:|Necessary map dlc:)\\s*(.{1,500}?)\\s*(?:List of changes|Official community|Authors:)",
+        "download_selector": "a.postlink",
+        "download_pattern": "^https://modsfire\\.com/",
+        "game_pattern": "(?i)Game version:\\s*(1\\.\\d{2})",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "2.61",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^rusmap[_ -]*models.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^rusmap[_ -]*map.*\\.scs$"
+          },
+          {
+            "pattern": "(?i)^rusmap[_ -]*def.*\\.scs$"
+          }
+        ]
+      },
+      "coverage": {
+        "summary": "Европейская часть России от Мурманска до Волгограда, а также Беларусь.",
+        "source": "https://forum.scssoft.com/viewtopic.php?t=332124",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "RUS",
+            "bounds": [
+              28,
+              48,
+              47,
+              70
+            ],
+            "rework": false
+          },
+          {
+            "country": "BLR",
+            "bounds": null,
+            "rework": false
+          }
+        ]
+      },
+      "require_verified_connections": true
+    },
+    {
+      "id": "poland-rebuilding",
+      "name": "Poland Rebuilding",
+      "region": "Польша",
+      "author": "Poland Rebuilding Team",
+      "description": "Перестройка Польши поверх ProMods. Сгенерируйте персональный DEF на сайте автора и скачайте все части.",
+      "source": {
+        "kind": "poland",
+        "url": "https://beta.truckymods.io/euro-truck-simulator-2/maps/poland-rebuilding",
+        "selector": "body",
+        "version_pattern": "(?i)Current Version\\s*([0-9]+(?:\\.[0-9a-z]+)+)",
+        "browser_url": "https://polandrebuilding.pl/en/download",
+        "date_pattern": "(?i)Last Updated\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "size_pattern": "(?i)Download\\s*\\(([^)]+)\\)",
+        "download_api": "/projects/createDownloadUrl",
+        "download_wait_seconds": 10,
+        "game_pattern": "(?i)Compatibility\\s*((?:1\\.\\d{2}\\s*)+)",
+        "follow_releases": true,
+        "supplements": [
+          {
+            "page": "https://polandrebuilding.pl/download/poland-rebuilding-3-0",
+            "selector": "a[href]",
+            "pattern": "^https://polandrebuilding\\.pl/dl\\.php\\?version={version}$",
+            "filename": "z1_PL_Rebuilding_{version}_def.scs"
+          }
+        ],
+        "mirrors": [
+          {
+            "page": "https://polandrebuilding.pl/download/poland-rebuilding-3-0",
+            "selector": "a[href]",
+            "pattern": "^https://sharemods\\.com/[^/]+/PL_Rebuilding_{version}_all\\.7z\\.html$",
+            "same_row": true
+          }
+        ]
+      },
+      "release": {
+        "version": "3.0.1",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^(?:z\\d+[_ -]+)?(?:pl[_ -]*rebuilding|polreb|pr|poland).*assets.*\\.(scs|zip)$"
+          },
+          {
+            "pattern": "(?i)^(?:z\\d+[_ -]+)?(?:pl[_ -]*rebuilding|polreb|pr|poland).*models?.*\\.(scs|zip)$"
+          },
+          {
+            "pattern": "(?i)^(?:z\\d+[_ -]+)?(?:pl[_ -]*rebuilding|polreb|pr|poland).*map.*\\.(scs|zip)$"
+          },
+          {
+            "pattern": "(?i)^(?:z\\d+[_ -]+)?(?:pl[_ -]*rebuilding|polreb|pr|poland).*def.*\\.(scs|zip)$"
+          }
+        ]
+      },
+      "dependencies": [
+        "promods-europe"
+      ],
+      "after": [
+        "promods-europe"
+      ],
+      "coverage": {
+        "summary": "Переработка и расширение дорожной сети Польши, включая центральные и северные регионы.",
+        "source": "https://beta.truckymods.io/euro-truck-simulator-2/maps/poland-rebuilding",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "POL",
+            "bounds": null,
+            "rework": true
+          }
+        ]
+      },
+      "require_verified_connections": true
+    },
+    {
+      "id": "roextended",
+      "name": "RoExtended",
+      "region": "Румыния, Украина, Турция",
+      "author": "RoExtended Project Team",
+      "description": "Бесплатная версия карты. Для доступа к загрузкам нужен аккаунт на форуме проекта.",
+      "source": {
+        "kind": "roextended",
+        "url": "https://roextended.ro/roextended.html",
+        "selector": "body",
+        "version_pattern": "(?i)Free version\\s*Roextended\\s+([0-9]+(?:\\.[0-9a-z]+)+)",
+        "game_pattern": "(?i)Free version\\s*Roextended\\s*[0-9.]+\\s*\\[ETS2\\s*(1\\.\\d{2})",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "5.3",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^.*(?:roex|rx).*4\\.scs$"
+          },
+          {
+            "pattern": "(?i)^.*(?:roex|rx).*3\\.scs$"
+          },
+          {
+            "pattern": "(?i)^.*(?:roex|rx).*2\\.scs$"
+          },
+          {
+            "pattern": "(?i)^.*(?:roex|rx).*1\\.scs$"
+          }
+        ]
+      },
+      "coverage": {
+        "summary": "Румыния, прилегающие районы Украины, Молдовы и Турции. Бесплатная и Premium-редакции могут различаться.",
+        "source": "https://roextended.ro/roextended.html",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "ROU",
+            "bounds": null,
+            "rework": true
+          },
+          {
+            "country": "MDA",
+            "bounds": null,
+            "rework": false
+          },
+          {
+            "country": "UKR",
+            "bounds": [
+              22,
+              44,
+              40,
+              51
+            ],
+            "rework": false
+          },
+          {
+            "country": "TUR",
+            "bounds": [
+              26,
+              36,
+              42,
+              42
+            ],
+            "rework": false
+          }
+        ]
+      },
+      "require_verified_connections": true
+    },
+    {
+      "id": "sibirmap",
+      "name": "SibirMap",
+      "region": "Сибирь и Урал",
+      "author": "10AVOID / SibirMap Team",
+      "description": "Отдельная карта Сибири. В этой конфигурации создаётся самостоятельный профиль; объединение с российскими картами требует отдельного проверенного набора.",
+      "source": {
+        "kind": "scs_forum",
+        "url": "https://forum.scssoft.com/viewtopic.php?t=294703",
+        "selector": ".postbody",
+        "version_pattern": "(?i)Version\\s*-\\s*([0-9]+(?:\\.[0-9a-z]+)+)",
+        "date_pattern": "(?i)UPD:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+        "requirements_pattern": "(?i)(?:Game version:|Necessary map dlc:)\\s*(.{1,500}?)\\s*(?:List of changes|Official community|Authors:)",
+        "download_selector": "a.postlink",
+        "download_pattern": "^https://sharemods\\.com/.*/sibirmap[^/]+\\.scs\\.html$",
+        "game_pattern": "(?i)Adaptation for game version\\s*(1\\.\\d{2})",
+        "follow_releases": true,
+        "mirrors": [
+          {
+            "page": "https://forum.scssoft.com/viewtopic.php?t=294703",
+            "selector": "#p1492530 .content a.postlink",
+            "pattern": "^https://(?:modsfire\\.com/[A-Za-z0-9]+|sharemods\\.com/[^/]+/sibirmap{version_compact}[^/]*\\.scs\\.html)$"
+          }
+        ]
+      },
+      "release": {
+        "version": "2.13.1",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^.*sibir.*\\.scs$"
+          }
+        ]
+      },
+      "module": "/map/siburmap.mbd",
+      "coverage": {
+        "summary": "Урал и Западная Сибирь: районы от Уфы и Челябинска до Омска и Барабинска, приграничный север Казахстана.",
+        "source": "https://forum.scssoft.com/viewtopic.php?t=294703",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "RUS",
+            "bounds": [
+              53,
+              53,
+              80,
+              59
+            ],
+            "rework": false
+          },
+          {
+            "country": "KAZ",
+            "bounds": [
+              65,
+              54,
+              71,
+              56
+            ],
+            "rework": false
+          }
+        ]
+      },
+      "require_verified_connections": true
+    },
+    {
+      "id": "grand-utopia",
+      "name": "Grand Utopia",
+      "region": "Вымышленный архипелаг",
+      "author": "MyGodness",
+      "description": "Самостоятельная карта масштаба 1:1. Для неё создаётся отдельный профиль Grand Utopia.",
+      "source": {
+        "kind": "truckymods",
+        "url": "https://beta.truckymods.io/euro-truck-simulator-2/maps/grand-utopia-map",
+        "selector": "body",
+        "version_pattern": "(?i)Current Version\\s*([0-9]+(?:\\.[0-9a-z]+)+)",
+        "date_pattern": "(?i)Last Updated\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "size_pattern": "(?i)Download\\s*\\(([^)]+)\\)",
+        "download_api": "/projects/createDownloadUrl",
+        "download_wait_seconds": 10,
+        "game_pattern": "(?i)Compatibility\\s*((?:1\\.\\d{2}\\s*)+)",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "1.20d",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^(?:GU[_ -]+)?Grand[_ -]?Utopia(?:[_ -]*\\(?v?\\d[^/]*)?\\.(scs|zip)$"
+          }
+        ]
+      },
+      "module": "/map/grandutopia.mbd",
+      "coverage": {
+        "summary": "Вымышленная самостоятельная карта масштаба 1:1. Географического положения в реальной Европе нет.",
+        "source": "https://beta.truckymods.io/euro-truck-simulator-2/maps/grand-utopia-map",
+        "fictional": true,
+        "areas": []
+      },
+      "require_verified_connections": true
+    },
+    {
+      "id": "more-european-cities",
+      "name": "More European Cities",
+      "region": "Европа",
+      "author": "MyGodness",
+      "description": "Доступные для доставки города на базовой карте. Сочетания с другими картами требуют отдельных проверенных исправлений.",
+      "source": {
+        "kind": "truckymods",
+        "url": "https://truckymods.io/euro-truck-simulator-2/maps/more-european-cities-543119",
+        "selector": "body",
+        "version_pattern": "(?i)Current Version\\s*([0-9]+(?:\\.[0-9a-z]+)+)",
+        "date_pattern": "(?i)Last Updated\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "size_pattern": "(?i)Download\\s*\\(([^)]+)\\)",
+        "download_api": "/projects/createDownloadUrl",
+        "download_wait_seconds": 10,
+        "game_pattern": "(?i)Compatibility\\s*((?:1\\.\\d{2}\\s*)+)",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "1.0a",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [
+          "dlc_east",
+          "dlc_north",
+          "dlc_fr",
+          "dlc_it",
+          "dlc_balt",
+          "dlc_balkan_e",
+          "dlc_iberia",
+          "dlc_balkan_w",
+          "dlc_greece",
+          "dlc_polar"
+        ],
+        "packages": [
+          {
+            "pattern": "(?i)^.*(?:more.*european|mec).*\\.(scs|zip)$"
+          }
+        ]
+      },
+      "coverage": {
+        "summary": "Активация декоративных населённых пунктов Греции и Швейцарии для доставки грузов; новых территорий не добавляет.",
+        "source": "https://truckymods.io/euro-truck-simulator-2/maps/more-european-cities-543119",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "GRC",
+            "bounds": null,
+            "rework": true
+          },
+          {
+            "country": "CHE",
+            "bounds": null,
+            "rework": true
+          }
+        ]
+      },
+      "require_verified_connections": true
+    },
+    {
+      "id": "promods-rusmap-connector",
+      "name": "ProMods — RusMap Connector",
+      "region": "Стыковка",
+      "author": "kworey",
+      "description": "Соединяет ProMods 2.84 и RusMap 2.61. Приоритет выше обеих карт.",
+      "source": {
+        "kind": "truckymods",
+        "url": "https://beta.truckymods.io/euro-truck-simulator-2/map-patches/promods-rusmap-connector-626771",
+        "selector": "body",
+        "version_pattern": "(?i)Current Version\\s*([0-9]+(?:[.\\-][0-9a-z]+)+)",
+        "date_pattern": "(?i)Last Updated\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "size_pattern": "(?i)Download\\s*\\(([^)]+)\\)",
+        "download_api": "/projects/createDownloadUrl",
+        "download_wait_seconds": 10,
+        "game_pattern": "(?i)Compatibility\\s*((?:1\\.\\d{2}\\s*)+)",
+        "follow_releases": true
+      },
+      "release": {
+        "version": "2.84-2.61-1.0",
+        "game_versions": [
+          "1.61"
+        ],
+        "dlcs": [],
+        "packages": [
+          {
+            "pattern": "(?i)^.*\\.(scs|zip)$"
+          }
+        ]
+      },
+      "dependencies": [
+        "promods-europe",
+        "rusmap"
+      ],
+      "after": [
+        "promods-europe",
+        "rusmap"
+      ],
+      "support": true,
+      "coverage": {
+        "summary": "Стыковка ProMods и RusMap: северо-запад России и соседние приграничные секторы.",
+        "source": "https://beta.truckymods.io/euro-truck-simulator-2/map-patches/promods-rusmap-connector-626771",
+        "fictional": false,
+        "areas": [
+          {
+            "country": "RUS",
+            "bounds": [
+              27,
+              54,
+              34,
+              70
+            ],
+            "rework": true
+          },
+          {
+            "country": "BLR",
+            "bounds": [
+              23,
+              51,
+              28,
+              57
+            ],
+            "rework": true
+          }
+        ]
+      }
+    }
+  ],
+  "connections": [
+    {
+      "when": [
+        "promods-europe",
+        "rusmap"
+      ],
+      "add": [
+        "promods-rusmap-connector"
+      ],
+      "verified": true,
+      "versions": {
+        "promods-europe": "2.84",
+        "rusmap": "2.61",
+        "promods-rusmap-connector": "2.84-2.61-1.0"
+      },
+      "note": "ProMods + RusMap: необходим коннектор kworey выше пакетов обеих карт.",
+      "live_versions": {
+        "source": "promods-rusmap-connector",
+        "pattern": "^([0-9]+(?:\\.[0-9]+)+)-([0-9]+(?:\\.[0-9]+)+)-[0-9.]+$",
+        "bindings": {
+          "promods-europe": 1,
+          "rusmap": 2
+        }
+      }
+    },
+    {
+      "when": [
+        "promods-europe",
+        "roextended"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "ProMods + RoExtended: требуется актуальный коннектор из раздела Road Connections автора."
+    },
+    {
+      "when": [
+        "rusmap",
+        "roextended"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "RusMap + RoExtended: требуется проверенная стыковка для выбранных версий."
+    },
+    {
+      "when": [
+        "more-european-cities",
+        "promods-europe"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "More European Cities: автор не гарантирует совместимость с изменяющими дороги картами. Нужен проверенный фикс."
+    },
+    {
+      "when": [
+        "more-european-cities",
+        "promods-middle-east"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "More European Cities: автор не гарантирует совместимость с изменяющими дороги картами. Нужен проверенный фикс."
+    },
+    {
+      "when": [
+        "more-european-cities",
+        "promods-great-steppe"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "More European Cities: автор не гарантирует совместимость с изменяющими дороги картами. Нужен проверенный фикс."
+    },
+    {
+      "when": [
+        "more-european-cities",
+        "promods-maghreb"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "More European Cities: автор не гарантирует совместимость с изменяющими дороги картами. Нужен проверенный фикс."
+    },
+    {
+      "when": [
+        "more-european-cities",
+        "rusmap"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "More European Cities: автор не гарантирует совместимость с изменяющими дороги картами. Нужен проверенный фикс."
+    },
+    {
+      "when": [
+        "more-european-cities",
+        "poland-rebuilding"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "More European Cities: автор не гарантирует совместимость с изменяющими дороги картами. Нужен проверенный фикс."
+    },
+    {
+      "when": [
+        "more-european-cities",
+        "roextended"
+      ],
+      "verified": false,
+      "add": [],
+      "note": "More European Cities: автор не гарантирует совместимость с изменяющими дороги картами. Нужен проверенный фикс."
+    },
+    {
+      "when": [
+        "poland-rebuilding",
+        "promods-europe",
+        "rusmap"
+      ],
+      "add": [],
+      "verified": false,
+      "note": "Poland Rebuilding + ProMods + RusMap: обычный парный коннектор не подтверждает тройную стыковку. Нужен вариант с Poland Rebuilding."
+    }
+  ],
+  "revision": 2026102407
+}

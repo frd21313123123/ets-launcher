@@ -26,6 +26,27 @@ fn manifest(library: &Path, install_dir: &str) {
 }
 
 #[test]
+fn steam_launch_uses_only_the_client_for_the_selected_installation() {
+    let root = tempfile::tempdir().unwrap();
+    let steam = root.path().join("Steam");
+    let game = steam.join("steamapps/common/Euro Truck Simulator 2");
+    installation(&game);
+    manifest(&steam, "Euro Truck Simulator 2");
+    std::fs::write(steam.join("steam.exe"), b"test client").unwrap();
+    let other = root.path().join("Manually chosen game");
+    installation(&other);
+    assert_eq!(
+        ets_launcher::game::steam_client_from_paths(
+            Game::Ets2,
+            &game,
+            std::slice::from_ref(&steam)
+        ),
+        Some(steam.join("steam.exe"))
+    );
+    assert!(ets_launcher::game::steam_client_from_paths(Game::Ets2, &other, &[steam]).is_none());
+}
+
+#[test]
 fn finds_custom_install_directory_in_a_second_steam_library() {
     let temp = tempfile::tempdir().unwrap();
     let steam = temp.path().join("Steam");

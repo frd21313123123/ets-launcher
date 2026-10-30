@@ -3,7 +3,9 @@ pub mod catalog;
 pub mod download;
 pub mod game;
 pub mod install;
+pub mod maps;
 pub mod playground;
+pub mod quper;
 pub mod settings;
 
 pub const SOURCE_PAGE: &str = "https://www.playground.ru/euro_truck_simulator_2/cheat/ets_2_dlc_unlocker_razblokirovschik_dopolnenij_1_61_1_9s_steam_nicholaspooh-1660372";

@@ -1,5 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser_smoke;
+mod mod_browser;
+mod quper_ui;
+
+use anyhow::Context;
+
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use ets_launcher::{
     SOURCE_PAGE,
@@ -26,6 +32,148 @@ const GREEN: Color32 = Color32::from_rgb(104, 224, 164);
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--quper-browser-file") {
+        anyhow::ensure!(
+            args.len() == 4,
+            "--quper-browser-file <public-url> <new-output-folder>"
+        );
+        return browser_smoke::run_public(PathBuf::from(&args[3]), &args[2]);
+    }
+    if args.get(1).is_some_and(|a| {
+        matches!(
+            a.as_str(),
+            "--quper-catalog" | "--quper-plan" | "--quper-download" | "--quper-file"
+        )
+    }) {
+        return quper_cli(&args);
+    }
+    if args.get(1).is_some_and(|arg| arg == "--map-import-test") {
+        let catalog = ets_launcher::maps::Catalog::bundled()?;
+        let entry = catalog.entry(
+            args.get(2)
+                .context("--map-import-test <id> <library> <report>")?,
+        )?;
+        let library = ets_launcher::maps::library::Library::open(std::path::Path::new(
+            args.get(3).context("Нужна библиотека")?,
+        ))?;
+        let record =
+            Runtime::new()?.block_on(library.import(entry, &[], &CancellationToken::new()))?;
+        ets_launcher::maps::write_json(
+            std::path::Path::new(args.get(4).context("Нужен отчёт")?),
+            &record,
+        )?;
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg| arg == "--map-apply-test") {
+        let report = ets_launcher::maps::audit::apply_test(
+            &ets_launcher::maps::Catalog::bundled()?,
+            args.get(2)
+                .context("--map-apply-test <id> <library> <game> <report>")?,
+            std::path::Path::new(args.get(3).context("Нужна библиотека")?),
+            std::path::Path::new(args.get(4).context("Нужна ETS2")?),
+        )?;
+        ets_launcher::maps::write_json(
+            std::path::Path::new(args.get(5).context("Нужен отчёт")?),
+            &report,
+        )?;
+        return Ok(());
+    }
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == "--browser-map-download")
+    {
+        return browser_smoke::run_map(
+            PathBuf::from(
+                args.get(3)
+                    .context("--browser-map-download <id> <new-directory>")?,
+            ),
+            args.get(2).context("Нужен ID карты")?,
+        );
+    }
+    if args.get(1).is_some_and(|arg| arg == "--map-audit") {
+        let catalog = ets_launcher::maps::Catalog::bundled()?;
+        let report = Runtime::new()?.block_on(ets_launcher::maps::audit::inspect(
+            &catalog,
+            &CancellationToken::new(),
+        ));
+        ets_launcher::maps::write_json(
+            std::path::Path::new(args.get(2).context("--map-audit <report.json>")?),
+            &report,
+        )?;
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg| arg == "--map-download") {
+        let id = args
+            .get(2)
+            .context("--map-download <id> <new-library> <report.json>")?;
+        let root = PathBuf::from(args.get(3).context("Нужна новая библиотека")?);
+        let output = PathBuf::from(args.get(4).context("Нужен путь отчёта")?);
+        let result = Runtime::new()?.block_on(ets_launcher::maps::audit::download(
+            &ets_launcher::maps::Catalog::bundled()?,
+            id,
+            &root,
+            &CancellationToken::new(),
+        ));
+        let report = match &result {
+            Ok(report) => report.clone(),
+            Err(error) => {
+                serde_json::json!({"id":id,"status":"error","message":format!("{error:#}")})
+            }
+        };
+        ets_launcher::maps::write_json(&output, &report)?;
+        result?;
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg| arg == "--browser-smoke") {
+        return browser_smoke::run(PathBuf::from(
+            args.get(2).context("--browser-smoke <new-directory>")?,
+        ));
+    }
+    if args.get(1).is_some_and(|arg| arg == "--map-sources") {
+        let output = args.get(2).context("--map-sources <report.json>")?;
+        let catalog = ets_launcher::maps::Catalog::bundled()?;
+        let states = Runtime::new()?.block_on(async {
+            use futures_util::{StreamExt, stream};
+            stream::iter(catalog.maps)
+                .map(|entry| async move {
+                    let result =
+                        ets_launcher::maps::source::fetch(&entry, &CancellationToken::new()).await;
+                    (
+                        entry.id,
+                        match result {
+                            Ok(state) => state,
+                            Err(error) => ets_launcher::maps::SourceState {
+                                error: Some(format!("{error:#}")),
+                                ..Default::default()
+                            },
+                        },
+                    )
+                })
+                .buffer_unordered(3)
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .await
+        });
+        ets_launcher::maps::write_json(std::path::Path::new(output), &states)?;
+        return Ok(());
+    }
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == "--create-test-profile")
+    {
+        let home = PathBuf::from(args.get(2).context("--create-test-profile <new-home>")?);
+        anyhow::ensure!(!home.exists(), "Тестовая папка уже существует");
+        let name = "Launcher QA";
+        let folder = home
+            .join("Euro Truck Simulator 2/profiles")
+            .join(ets_launcher::maps::profile::folder_name(name));
+        std::fs::create_dir_all(&folder)?;
+        std::fs::create_dir(home.join("Euro Truck Simulator 2/mod"))?;
+        std::fs::write(
+            folder.join("profile.sii"),
+            ets_launcher::maps::profile::create(name, "/map/europe.mbd", &[])?,
+        )?;
+        return Ok(());
+    }
     if args.get(1).is_some_and(|arg| arg == "--catalog") {
         let game = cli_game(&args, 3)?;
         let output = args
@@ -189,8 +337,8 @@ fn main() -> anyhow::Result<()> {
     ))?);
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([880.0, 820.0])
-            .with_min_inner_size([760.0, 620.0])
+            .with_inner_size([1120.0, 850.0])
+            .with_min_inner_size([980.0, 640.0])
             .with_title("ETS & ATS Launcher")
             .with_icon(app_icon.clone()),
         renderer: eframe::Renderer::Glow,
@@ -231,6 +379,8 @@ fn main() -> anyhow::Result<()> {
                 catalog_receiver,
                 source_editor,
                 logo,
+                maps: quper_ui::QuperUi::new(&Settings::load()),
+                maps_open: false,
             };
             launcher.search_game(&cc.egui_ctx, true);
             for game in Game::ALL {
@@ -247,6 +397,61 @@ fn cli_game(args: &[String], index: usize) -> anyhow::Result<Game> {
         .map(|value| value.parse())
         .transpose()
         .map(|game| game.unwrap_or_default())
+}
+
+fn quper_cli(args: &[String]) -> anyhow::Result<()> {
+    use ets_launcher::quper;
+    let runtime = Runtime::new()?;
+    let cancel = CancellationToken::new();
+    if args[1] == "--quper-file" {
+        anyhow::ensure!(
+            args.len() == 5,
+            "--quper-file <public-url> <download-folder> <report.json>"
+        );
+        let state = Arc::new(Mutex::new(Transfer::default()));
+        let result = runtime.block_on(quper::files::download_source(
+            &args[2],
+            &PathBuf::from(&args[3]),
+            &state,
+            &cancel,
+        ));
+        let report = match &result {
+            Ok(files) => serde_json::json!({"status":"downloaded", "files":files}),
+            Err(e) => serde_json::json!({"status":"error", "message":format!("{e:#}")}),
+        };
+        ets_launcher::maps::write_json(std::path::Path::new(&args[4]), &report)?;
+        result?;
+        return Ok(());
+    }
+    let catalog = runtime.block_on(quper::source::fetch_catalog(&cancel))?;
+    if args[1] == "--quper-catalog" {
+        anyhow::ensure!(args.len() == 3, "--quper-catalog <report.json>");
+        return ets_launcher::maps::write_json(std::path::Path::new(&args[2]), &catalog);
+    }
+    let combo = catalog
+        .combos
+        .iter()
+        .find(|c| Some(&c.id) == args.get(2))
+        .context("Сборка не найдена в публичном каталоге Quper")?;
+    let plan = runtime.block_on(quper::source::fetch_plan(combo, &cancel))?;
+    if args[1] == "--quper-plan" {
+        anyhow::ensure!(args.len() == 4, "--quper-plan <combo-id> <report.json>");
+        return ets_launcher::maps::write_json(std::path::Path::new(&args[3]), &plan);
+    }
+    anyhow::ensure!(
+        args.len() == 5,
+        "--quper-download <combo-id> <library-folder> <report.json>"
+    );
+    let library = quper::library::Library::open(std::path::Path::new(&args[3]))?;
+    let transfer = Arc::new(Mutex::new(Transfer::default()));
+    let result = runtime.block_on(library.download(&plan, &transfer, &cancel));
+    let report = match &result {
+        Ok(report) => serde_json::to_value(report)?,
+        Err(e) => serde_json::json!({"status":"error", "message":format!("{e:#}")}),
+    };
+    ets_launcher::maps::write_json(std::path::Path::new(&args[4]), &report)?;
+    result?;
+    Ok(())
 }
 
 fn configure(ctx: &egui::Context) {
@@ -298,6 +503,8 @@ struct Launcher {
     catalog_sender: mpsc::Sender<CatalogUpdate>,
     catalog_receiver: mpsc::Receiver<CatalogUpdate>,
     source_editor: String,
+    maps: quper_ui::QuperUi,
+    maps_open: bool,
 }
 
 struct CatalogUpdate {
@@ -459,11 +666,17 @@ fn card() -> egui::Frame {
 }
 
 impl eframe::App for Launcher {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_game_search();
         self.poll_catalogs();
         let transfer = download::snapshot(&self.state);
-        let busy = transfer.active();
+        self.maps.tick(
+            ctx,
+            self.runtime.as_ref().unwrap(),
+            &self.settings,
+            transfer.active(),
+        );
+        let busy = transfer.active() || self.maps.busy();
         if !busy {
             for game in Game::ALL {
                 self.refresh_catalog(ctx, game, false);
@@ -474,6 +687,7 @@ impl eframe::App for Launcher {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_when_idle = true;
             self.cancel.cancel();
+            self.maps.cancel_all();
         }
         if self.close_when_idle && !busy {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -484,6 +698,18 @@ impl eframe::App for Launcher {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(30))
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.maps_open, false, "DLC и настройки игры");
+                    ui.selectable_value(&mut self.maps_open, true, "Сборки Quper");
+                });
+                ui.add_space(12.0);
+                if self.maps_open {
+                    egui::ScrollArea::vertical().id_salt("maps-page").show(ui, |ui| {
+                        self.maps.show(ui, ctx, frame, self.runtime.as_ref().unwrap(), &mut self.settings, transfer.active());
+                    });
+                    return;
+                }
+                self.maps.suspend_browser();
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(42.0)));
@@ -810,6 +1036,7 @@ impl eframe::App for Launcher {
 impl Drop for Launcher {
     fn drop(&mut self) {
         self.cancel.cancel();
+        self.maps.cancel_all();
         for state in &self.catalogs {
             state.cancel.cancel();
         }

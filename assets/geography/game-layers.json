@@ -1,0 +1,348 @@
+[
+  {
+    "id": "base",
+    "name": "Базовая ETS2",
+    "areas": [
+      {
+        "country": "GBR",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "DEU",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "BEL",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "NLD",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "LUX",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "CHE",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "AUT",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "CZE",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "FRA",
+        "bounds": [
+          -5,
+          47,
+          9,
+          52
+        ],
+        "rework": false
+      },
+      {
+        "country": "ITA",
+        "bounds": [
+          6,
+          44,
+          19,
+          48
+        ],
+        "rework": false
+      },
+      {
+        "country": "POL",
+        "bounds": [
+          14,
+          49,
+          20,
+          55
+        ],
+        "rework": false
+      },
+      {
+        "country": "SVK",
+        "bounds": [
+          16,
+          47,
+          19,
+          50
+        ],
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_east",
+    "name": "Going East!",
+    "areas": [
+      {
+        "country": "POL",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "SVK",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "HUN",
+        "bounds": null,
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_north",
+    "name": "Scandinavia",
+    "areas": [
+      {
+        "country": "DNK",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "NOR",
+        "bounds": [
+          3,
+          57,
+          18,
+          63
+        ],
+        "rework": false
+      },
+      {
+        "country": "SWE",
+        "bounds": [
+          10,
+          55,
+          20,
+          61
+        ],
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_fr",
+    "name": "Vive la France!",
+    "areas": [
+      {
+        "country": "FRA",
+        "bounds": null,
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_it",
+    "name": "Italia",
+    "areas": [
+      {
+        "country": "ITA",
+        "bounds": null,
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_balt",
+    "name": "Beyond the Baltic Sea",
+    "areas": [
+      {
+        "country": "EST",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "LVA",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "LTU",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "FIN",
+        "bounds": [
+          19,
+          59,
+          32,
+          62
+        ],
+        "rework": false
+      },
+      {
+        "country": "RUS",
+        "bounds": [
+          19,
+          54,
+          22.8,
+          55.6
+        ],
+        "rework": false
+      },
+      {
+        "country": "RUS",
+        "bounds": [
+          27,
+          58,
+          33,
+          61
+        ],
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_balkan_e",
+    "name": "Road to the Black Sea",
+    "areas": [
+      {
+        "country": "ROU",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "BGR",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "TUR",
+        "bounds": [
+          25,
+          40,
+          29,
+          43
+        ],
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_iberia",
+    "name": "Iberia",
+    "areas": [
+      {
+        "country": "ESP",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "PRT",
+        "bounds": null,
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_balkan_w",
+    "name": "West Balkans",
+    "areas": [
+      {
+        "country": "SVN",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "HRV",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "BIH",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "SRB",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "MNE",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "ALB",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "MKD",
+        "bounds": null,
+        "rework": false
+      },
+      {
+        "country": "KOS",
+        "bounds": null,
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_greece",
+    "name": "Greece",
+    "areas": [
+      {
+        "country": "GRC",
+        "bounds": null,
+        "rework": false
+      }
+    ]
+  },
+  {
+    "id": "dlc_polar",
+    "name": "Nordic Horizons",
+    "areas": [
+      {
+        "country": "NOR",
+        "bounds": [
+          3,
+          61,
+          33,
+          72
+        ],
+        "rework": false
+      },
+      {
+        "country": "SWE",
+        "bounds": [
+          10,
+          60,
+          25,
+          70
+        ],
+        "rework": false
+      },
+      {
+        "country": "FIN",
+        "bounds": [
+          19,
+          61,
+          33,
+          71
+        ],
+        "rework": false
+      }
+    ]
+  }
+]

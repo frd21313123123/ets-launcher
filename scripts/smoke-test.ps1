@@ -4,6 +4,12 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Distribution) { $Distribution = Join-Path $projectRoot 'dist' }
 $Distribution = (Resolve-Path -LiteralPath $Distribution).Path
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$bundle = [IO.Compression.ZipFile]::OpenRead((Join-Path $Distribution 'ets-launcher-windows-x64.zip'))
+try {
+    if ($bundle.Entries | Where-Object { $_.FullName.Replace('\', '/') -eq 'catalog/ets2.json' }) { throw 'Distribution ZIP still contains the replaced map catalog.' }
+    if (-not ($bundle.Entries | Where-Object { $_.Name -eq 'quper-verification.md' })) { throw 'Distribution ZIP is missing the Quper documentation.' }
+} finally { $bundle.Dispose() }
 foreach ($requiredFile in @('ets-launcher.exe')) {
     if (-not (Test-Path -LiteralPath (Join-Path $Distribution $requiredFile) -PathType Leaf)) {
         throw "Distribution is missing $requiredFile"
@@ -19,7 +25,7 @@ Copy-Item -LiteralPath (Join-Path $Distribution 'ets-launcher.exe') -Destination
 # Development GNU builds still need their toolchain DLLs. CI checks the MSVC
 # build with -Standalone and copies exactly one executable, with no neighbors.
 if (-not $Standalone) {
-    foreach ($library in @('libgcc_s_seh-1.dll', 'libwinpthread-1.dll')) {
+    foreach ($library in @('libgcc_s_seh-1.dll', 'libwinpthread-1.dll', 'WebView2Loader.dll')) {
         $path = Join-Path $Distribution $library
         if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination $application }
     }
