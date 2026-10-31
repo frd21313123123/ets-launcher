@@ -28,6 +28,12 @@ pub struct Settings {
     pub quper_library: Option<PathBuf>,
     #[serde(default)]
     pub theme: Theme,
+    /// Browser for downloads the launcher hands off (`None`: the system default).
+    #[serde(default)]
+    pub download_browser: Option<PathBuf>,
+    /// Where that browser saves files (`None`: the system Downloads folder).
+    #[serde(default)]
+    pub browser_downloads: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +58,8 @@ impl Default for Settings {
             mod_catalog_source: None,
             quper_library: None,
             theme: Theme::Black,
+            download_browser: None,
+            browser_downloads: None,
             output: UserDirs::new()
                 .and_then(|dirs| dirs.download_dir().map(|dir| dir.join("ETS Launcher")))
                 .unwrap_or_else(|| PathBuf::from("downloads")),

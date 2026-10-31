@@ -85,29 +85,7 @@ fn is_modsfire(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Opens an address in the system browser. Debug builds can log it instead
-/// (`ETS_LAUNCHER_OPEN_LOG`) so the queue is testable without a browser.
-fn open_in_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(debug_assertions)]
-    if let Some(log) = std::env::var_os("ETS_LAUNCHER_OPEN_LOG") {
-        use std::io::Write;
-        return std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log)
-            .and_then(|mut f| writeln!(f, "{url}"));
-    }
-    open::that(url)
-}
-
-/// The Downloads folder; debug builds can point elsewhere (`ETS_LAUNCHER_DOWNLOADS_DIR`).
-fn downloads_folder() -> Option<PathBuf> {
-    #[cfg(debug_assertions)]
-    if let Some(folder) = std::env::var_os("ETS_LAUNCHER_DOWNLOADS_DIR") {
-        return Some(folder.into());
-    }
-    directories::UserDirs::new().and_then(|d| d.download_dir().map(PathBuf::from))
-}
+use crate::browsers::{downloads_folder, open_url as open_in_browser};
 
 struct DownloadWatch {
     folder: PathBuf,
@@ -2269,7 +2247,7 @@ impl QuperUi {
                     ));
                     ui.add(
                         egui::Label::new(ui::text(
-                            "Сайт защищён проверкой Cloudflare, которая во встроенном браузере может не проходить. Лаунчер откроет эти файлы по одному в вашем обычном браузере, скрипт для Tampermonkey нажмёт кнопки сайта, а скачанные файлы подключатся к сборке сами.",
+                            "Сайт защищён проверкой Cloudflare, которая во встроенном браузере может не проходить. Лаунчер откроет эти файлы по одному в вашем обычном браузере, скрипт для Tampermonkey нажмёт кнопки сайта, а скачанные файлы подключатся к сборке сами. Браузер, папка загрузок и подготовка Tampermonkey — в «Настройки → Загрузка через браузер».",
                             13.0,
                             W::Regular,
                             p.muted,

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod browser_smoke;
+mod browsers;
 mod clipboard_files;
 mod mod_browser;
 mod quper_ui;
@@ -379,6 +380,10 @@ fn main() -> anyhow::Result<()> {
             let (game_sender, game_receiver) = mpsc::channel();
             let (closed_sender, closed_receiver) = mpsc::channel();
             let quper = quper_ui::QuperUi::new(&settings);
+            browsers::set_preferences(
+                settings.download_browser.clone(),
+                settings.browser_downloads.clone(),
+            );
             let mut launcher = Launcher {
                 runtime: Some(runtime),
                 settings,
@@ -406,6 +411,8 @@ fn main() -> anyhow::Result<()> {
                 quper,
                 page: Page::Dlc,
                 stage: 0,
+                installed_browsers: browsers::detect(),
+                default_browser: browsers::system_default(),
                 #[cfg(debug_assertions)]
                 script: ui_script::Script::from_env(),
             };
@@ -536,6 +543,10 @@ struct Launcher {
     page: Page,
     /// Last installation stage reached, kept to show where an error happened.
     stage: usize,
+    /// Browsers registered in Windows, for the download settings.
+    installed_browsers: Vec<browsers::Installed>,
+    /// The browser Windows opens links with, when no other is chosen.
+    default_browser: Option<PathBuf>,
     #[cfg(debug_assertions)]
     script: Option<ui_script::Script>,
 }
@@ -1801,6 +1812,280 @@ impl Launcher {
                     });
                 });
             });
+        self.browser_settings(ui);
+    }
+
+    /// Browser hand-off for sites whose check does not pass inside the launcher.
+    fn browser_settings(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
+        let chosen = self.settings.download_browser.clone();
+        // The browser that will actually open: the chosen one or the system default.
+        let effective = chosen.clone().or_else(|| self.default_browser.clone());
+        let family = effective
+            .as_deref()
+            .map(browsers::family)
+            .unwrap_or(browsers::Family::Edge);
+        let name_of = |exe: &std::path::Path| {
+            self.installed_browsers
+                .iter()
+                .find(|b| b.exe == exe)
+                .map(|b| b.name.clone())
+                .unwrap_or_else(|| {
+                    exe.file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| exe.display().to_string())
+                })
+        };
+        let default_label = match &self.default_browser {
+            Some(exe) => format!("По умолчанию в Windows — {}", name_of(exe)),
+            None => "Браузер по умолчанию в Windows".to_owned(),
+        };
+        let chosen_name = match &chosen {
+            None => default_label.clone(),
+            Some(exe) => name_of(exe),
+        };
+        let mut changed = false;
+        ui.label(ui::text("Загрузка через браузер", 20.0, W::Extra, p.text));
+        ui.add(
+            egui::Label::new(ui::text(
+                "Для сайтов с проверкой Cloudflare (например, ModsFire) лаунчер открывает файлы в вашем браузере, а скачанное забирает из папки загрузок. Здесь выбирается браузер и готовится Tampermonkey со скриптом, который нажимает кнопки сайта.",
+                13.0,
+                W::Regular,
+                p.muted,
+            ))
+            .wrap(),
+        );
+        egui::Frame::new()
+            .fill(p.panel)
+            .stroke(Stroke::new(1.0_f32, p.line))
+            .corner_radius(16)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+
+                // Browser.
+                settings_row(ui, &p, true, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.label(ui::text("Браузер для загрузок", 15.0, W::Bold, p.text));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        egui::ComboBox::from_id_salt("download-browser")
+                            .width(300.0)
+                            .selected_text(ui::text(&chosen_name, 14.0, W::Semi, p.text))
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(chosen.is_none(), &default_label)
+                                    .clicked()
+                                {
+                                    self.settings.download_browser = None;
+                                    changed = true;
+                                }
+                                for browser in &self.installed_browsers {
+                                    if ui
+                                        .selectable_label(
+                                            chosen.as_ref() == Some(&browser.exe),
+                                            &browser.name,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.settings.download_browser = Some(browser.exe.clone());
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        if Button::new("Другой…", Kind::Ghost)
+                            .height(36.0)
+                            .size(13.0)
+                            .pad(12.0)
+                            .show(ui, &p)
+                            .on_hover_text("Выбрать .exe браузера, которого нет в списке")
+                            .clicked()
+                            && let Some(exe) = rfd::FileDialog::new()
+                                .set_title("Программа браузера")
+                                .add_filter("Программа", &["exe"])
+                                .pick_file()
+                        {
+                            self.settings.download_browser = Some(exe);
+                            changed = true;
+                        }
+                        if Button::new("Обновить список", Kind::Ghost)
+                            .height(36.0)
+                            .size(13.0)
+                            .pad(12.0)
+                            .show(ui, &p)
+                            .clicked()
+                        {
+                            self.installed_browsers = browsers::detect();
+                            self.default_browser = browsers::system_default();
+                        }
+                        if Button::new("Проверить", Kind::Ghost)
+                            .icon(Icon::External)
+                            .height(36.0)
+                            .size(13.0)
+                            .pad(12.0)
+                            .show(ui, &p)
+                            .on_hover_text("Открыть страницу в выбранном браузере")
+                            .clicked()
+                            && let Err(error) = browsers::open_url("https://modsfire.com/")
+                        {
+                            self.note = Some(format!("Не удалось открыть браузер: {error}"));
+                        }
+                    });
+                    let kind = match (effective.is_some(), family) {
+                        (false, _) => "Откроется тот браузер, что выбран в Windows по умолчанию.",
+                        (true, browsers::Family::Firefox) => {
+                            "Firefox-совместимый браузер (Zen, Firefox, LibreWolf, Floorp): Tampermonkey ставится из Firefox Add-ons."
+                        }
+                        (true, browsers::Family::Edge) => {
+                            "Microsoft Edge: Tampermonkey ставится из магазина Edge Add-ons."
+                        }
+                        (true, browsers::Family::Chromium) => {
+                            "Браузер на Chromium: Tampermonkey ставится из Chrome Web Store."
+                        }
+                    };
+                    ui.label(ui::text(kind, 12.0, W::Regular, p.muted));
+                });
+
+                // Downloads folder.
+                let folder = browsers::downloads_folder()
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_else(|| "не найдена".into());
+                let mut pick = false;
+                let mut reset = false;
+                let change = Button::new("Изменить…", Kind::Raised)
+                    .height(40.0)
+                    .size(13.0)
+                    .pad(14.0);
+                let default = Button::new("По умолчанию", Kind::Ghost)
+                    .height(40.0)
+                    .size(13.0)
+                    .pad(14.0)
+                    .enabled(self.settings.browser_downloads.is_some());
+                let actions = change.width(ui) + default.width(ui) + 8.0;
+                settings_row(ui, &p, true, |ui| {
+                    ui::split_row(
+                        ui,
+                        actions,
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            ui.label(ui::text("Папка загрузок браузера", 15.0, W::Bold, p.text));
+                            ui.add(
+                                egui::Label::new(ui::text(
+                                    "Отсюда лаунчер забирает скачанные моды. Должна совпадать с папкой в настройках браузера.",
+                                    12.0,
+                                    W::Regular,
+                                    p.muted,
+                                ))
+                                .wrap(),
+                            );
+                            ui.add(
+                                egui::Label::new(ui::mono_text(&folder, 12.0, false, p.text2))
+                                    .wrap(),
+                            );
+                        },
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            pick = change.show(ui, &p).clicked();
+                            reset = default.show(ui, &p).clicked();
+                        },
+                    );
+                });
+                if pick
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_title("Папка загрузок браузера")
+                        .pick_folder()
+                {
+                    self.settings.browser_downloads = Some(path);
+                    changed = true;
+                }
+                if reset {
+                    self.settings.browser_downloads = None;
+                    changed = true;
+                }
+
+                // Tampermonkey.
+                settings_row(ui, &p, false, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.label(ui::text("Подготовка браузера и Tampermonkey", 15.0, W::Bold, p.text));
+                    let mut steps = vec![
+                        "1. Установите расширение Tampermonkey — кнопка ниже откроет его страницу в выбранном браузере.".to_owned(),
+                    ];
+                    match family {
+                        browsers::Family::Firefox => steps.push(
+                            "2. В Zen и Firefox дополнительных разрешений не нужно. Если Tampermonkey спросит доступ к сайтам, разрешите.".into(),
+                        ),
+                        _ => steps.push(
+                            "2. Откройте страницу расширений браузера (chrome://extensions или edge://extensions) → Tampermonkey → «Сведения» и включите «Разрешить пользовательские скрипты». В старых версиях вместо этого включается «Режим разработчика».".into(),
+                        ),
+                    }
+                    steps.push(
+                        "3. Нажмите «Установить скрипт» и подтвердите установку в окне Tampermonkey.".into(),
+                    );
+                    steps.push(match family {
+                        browsers::Family::Firefox => "4. Настройки → Общие → Файлы и приложения: выключите «Всегда спрашивать, куда сохранять файлы», чтобы файлы сразу попадали в папку загрузок.".into(),
+                        _ => "4. Настройки → Загрузки: выключите «Всегда указывать место для скачивания», чтобы файлы сразу попадали в папку загрузок.".into(),
+                    });
+                    for step in &steps {
+                        ui.add(egui::Label::new(ui::text(step, 13.0, W::Regular, p.text2)).wrap());
+                    }
+                    ui.add(
+                        egui::Label::new(ui::text(
+                            "Скрипт работает только во вкладках, открытых лаунчером, и нажимает лишь бесплатные кнопки сайта. Проверку Cloudflare он не трогает — её проходите вы.",
+                            12.0,
+                            W::Regular,
+                            p.muted,
+                        ))
+                        .wrap(),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        if Button::new("Открыть Tampermonkey", Kind::Ghost)
+                            .trailing(Icon::External)
+                            .height(40.0)
+                            .size(13.0)
+                            .show(ui, &p)
+                            .clicked()
+                            && let Err(error) =
+                                browsers::open_url(browsers::tampermonkey_page(family))
+                        {
+                            self.note = Some(format!("Не удалось открыть браузер: {error}"));
+                        }
+                        if Button::new("Установить скрипт", Kind::Primary)
+                            .height(40.0)
+                            .size(13.0)
+                            .show(ui, &p)
+                            .clicked()
+                        {
+                            let result = crate::userscript::serve(self.runtime.as_ref().unwrap())
+                                .and_then(|url| Ok(browsers::open_url(&url)?));
+                            self.note = Some(match result {
+                                Ok(()) => "В браузере откроется окно Tampermonkey — нажмите «Установить». Если вместо него показан текст скрипта, сначала установите Tampermonkey.".into(),
+                                Err(error) => format!("Не удалось открыть установку скрипта: {error}"),
+                            });
+                        }
+                        if Button::new("Скопировать скрипт", Kind::Ghost)
+                            .height(40.0)
+                            .size(13.0)
+                            .show(ui, &p)
+                            .on_hover_text("Tampermonkey → «Создать новый скрипт» → вставить")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(crate::userscript::SCRIPT.to_owned());
+                            self.note = Some("Скрипт скопирован: в Tampermonkey создайте новый скрипт, вставьте текст и сохраните.".into());
+                        }
+                    });
+                });
+            });
+        if changed {
+            browsers::set_preferences(
+                self.settings.download_browser.clone(),
+                self.settings.browser_downloads.clone(),
+            );
+            if let Err(error) = self.settings.save() {
+                self.note = Some(error.to_string());
+            }
+        }
     }
 }
 
