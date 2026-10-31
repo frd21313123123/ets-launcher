@@ -84,7 +84,10 @@ impl Browser {
                     fields: [...f.querySelectorAll('input,button')].map(e => ({tag:e.tagName, name:e.name, type:e.type, id:e.id, disabled:e.disabled, text:e.tagName==='BUTTON'?e.textContent.trim().slice(0,100):undefined}))
                 })),
                 buttons: [...document.querySelectorAll('button,a[id],input[type="submit"]')].slice(0,100).map(e=>({tag:e.tagName,id:e.id,name:e.name,text:(e.textContent||e.value||'').trim().slice(0,100),disabled:e.disabled})),
-                captcha: !!document.querySelector('iframe[src*="captcha"], .h-captcha, .g-recaptcha')
+                captcha: !!document.querySelector('iframe[src*="captcha"], .h-captcha, .g-recaptcha'),
+                turnstile: !!document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]'),
+                turnstileSolved: [...document.querySelectorAll('input[name="cf-turnstile-response"]')].some(t => t.value.length > 20),
+                url: location.origin + location.pathname
             }))()"#, move |data| {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) { let _ = maps::write_json(&output, &value); }
             });
@@ -352,15 +355,39 @@ impl Browser {
 
 const QUPER_FREE_DOWNLOAD: &str = r#"
 (() => {
-    const hosts = ['sharemods.com', 'www.sharemods.com', 'modsfire.com', 'www.modsfire.com'];
+    const hosts = ['sharemods.com', 'www.sharemods.com', 'modsfire.com', 'www.modsfire.com', 'mods.to', 'www.mods.to'];
     if (!hosts.includes(location.hostname)) return;
     let acted = false;
     let readyAt = null;
+    // A Cloudflare Turnstile widget hands the page a token once the visitor is
+    // verified. The host rejects a form sent without it and shows the check
+    // again, so every action waits for the token. The widget itself is never
+    // touched: if Cloudflare asks for a click, the visitor makes it.
+    const turnstilePending = () => {
+        const widgets = document.querySelectorAll('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
+        if (!widgets.length) return false;
+        const tokens = [...document.querySelectorAll('input[name="cf-turnstile-response"]')];
+        return !tokens.some(t => t.value && t.value.length > 20);
+    };
+    let consentDeclined = false;
+    let checkShown = false;
     const timer = setInterval(() => {
         if (acted || document.readyState === 'loading') return;
         if (readyAt === null) readyAt = Date.now();
         const visible = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+        // Cookie walls cover the page and the Cloudflare widget. They are always
+        // answered with the most private choice.
+        if (!consentDeclined) {
+            const reject = [...document.querySelectorAll('button, a[role="button"]')].find(b => visible(b) && /^(reject all|decline all|refuse all|отклонить все|отклонить)$/i.test(b.textContent.trim()));
+            if (reject) { consentDeclined = true; reject.click(); }
+        }
         if ([...document.querySelectorAll('iframe[src*="captcha"], .h-captcha, .g-recaptcha')].some(visible)) return;
+        if (turnstilePending()) {
+            // Keep the check in sight in case Cloudflare asks the visitor to click it.
+            const widget = document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
+            if (!checkShown && widget) { checkShown = true; widget.scrollIntoView({ block: 'center' }); }
+            return;
+        }
         const direct = document.querySelector('a#downloadnow[href], a#downloadbtn[href], a#download_link[href]') || [...document.querySelectorAll('a[href]')].find(a => /^start download(?:\s|$)/i.test(a.textContent.trim()));
         if (direct) {
             const url = new URL(direct.href, location.href);
@@ -378,10 +405,17 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
             if (!form || form.querySelector('input[type="password"], input[name="captcha"]')) return;
             const target = new URL(form.getAttribute('action') || location.href, location.href);
             if (target.origin !== location.origin) return;
-            const button = form.querySelector('button[name="method_free"], input[name="method_free"]') || [...form.querySelectorAll('button, input[type="submit"]')].find(b => {
+            // `method_free` is often a hidden field: clicking it does nothing, so
+            // only real submit controls are considered.
+            const button = form.querySelector('button[name="method_free"], input[type="submit"][name="method_free"]') || [...form.querySelectorAll('button, input[type="submit"]')].find(b => {
                 const label = (b.value || b.textContent).trim().replace(/\s+/g, ' ');
                 return !/premium|paid/i.test(label) && /^(create download link|free download|start download|download)(?:\s|$)/i.test(label);
             });
+            if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+                acted = true; clearInterval(timer); button.click();
+            }
+        } else if (location.hostname.includes('mods.to')) {
+            const button = [...document.querySelectorAll('button, a[href]')].find(b => /^start now$/i.test(b.textContent.trim()));
             if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
                 acted = true; clearInterval(timer); button.click();
             }
@@ -390,6 +424,6 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
             if (button && !button.disabled) { acted = true; clearInterval(timer); button.click(); }
         }
     }, 1500);
-    setTimeout(() => clearInterval(timer), 180000);
+    setTimeout(() => clearInterval(timer), 600000);
 })();
 "#;
