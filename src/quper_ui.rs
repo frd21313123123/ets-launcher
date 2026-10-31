@@ -37,6 +37,8 @@ enum Event {
     Job(Result<Report, String>),
     Size(String, Result<Estimate, String>),
     Profile(Result<LocalProfile, String>),
+    /// An author's page and the file-host link behind its "Download" button.
+    Resolved(String, Option<String>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -133,6 +135,10 @@ pub struct QuperUi {
     downloads: Option<DownloadWatch>,
     paste: crate::clipboard_files::PasteKey,
     modsfire: Option<BrowserQueue>,
+    /// Author pages resolved to the file host behind them.
+    resolved: BTreeMap<String, String>,
+    resolving: BTreeSet<String>,
+    modsfire_in_browser: bool,
     script_help: bool,
     /// Download size per build, `None` while unknown; read from cache on demand.
     sizes: BTreeMap<String, Option<Estimate>>,
@@ -189,6 +195,9 @@ impl QuperUi {
             downloads: None,
             paste: Default::default(),
             modsfire: None,
+            resolved: BTreeMap::new(),
+            resolving: BTreeSet::new(),
+            modsfire_in_browser: settings.modsfire_in_browser,
             script_help: false,
             sizes: BTreeMap::new(),
             sizing: None,
@@ -240,6 +249,69 @@ impl QuperUi {
     }
 
     /// Starts opening the build's ModsFire files in the system browser.
+    /// The address to download from: an author's page is replaced by the
+    /// file-host link behind it once known.
+    fn target(&self, url: &str) -> String {
+        self.resolved
+            .get(url)
+            .cloned()
+            .unwrap_or_else(|| url.to_owned())
+    }
+
+    /// Finds the file-host link behind each author's page of the open build.
+    fn resolve_author_pages(&mut self, ctx: &egui::Context, runtime: &Runtime) {
+        let Some(plan) = &self.plan else { return };
+        let pages = plan
+            .files
+            .iter()
+            .filter(|r| r.required)
+            .filter_map(|r| r.urls.first())
+            .filter(|url| {
+                !self.resolved.contains_key(*url)
+                    && !self.resolving.contains(*url)
+                    && reqwest::Url::parse(url).is_ok_and(|u| !quper::files::is_file_host(&u))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for page in pages {
+            self.resolving.insert(page.clone());
+            let (sender, cancel, ctx) = (
+                self.sender.clone(),
+                self.metadata_cancel.clone(),
+                ctx.clone(),
+            );
+            runtime.spawn(async move {
+                let target = async {
+                    let client = quper::source::client().ok()?;
+                    let (final_url, html) =
+                        quper::source::get(&client, &page, &cancel).await.ok()?;
+                    let base = reqwest::Url::parse(&final_url).ok()?;
+                    quper::files::primary_download(&base, &String::from_utf8_lossy(&html))
+                        .map(|u| u.to_string())
+                }
+                .await;
+                let _ = sender.send(Event::Resolved(page, target));
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    /// Adds ModsFire files to the browser queue, starting it when needed.
+    fn queue_modsfire(&mut self, files: Vec<(String, String)>) {
+        if let Some(queue) = &mut self.modsfire {
+            for file in files {
+                let known = queue.current.as_ref().is_some_and(|(u, _)| *u == file.0)
+                    || queue.pending.iter().any(|(u, _)| *u == file.0);
+                if !known {
+                    queue.pending.push_back(file);
+                    queue.total += 1;
+                }
+            }
+        } else {
+            self.start_modsfire(files);
+        }
+    }
+
     fn start_modsfire(&mut self, files: Vec<(String, String)>) {
         if files.is_empty() {
             return;
@@ -748,8 +820,20 @@ impl QuperUi {
     fn next_browser(&mut self) {
         self.browser.cancel();
         self.browser_current = None;
-        if let Some(next) = self.browser_queue.pop_front() {
-            self.browser_request = Some(next);
+        let mut handed = Vec::new();
+        while let Some((url, name)) = self.browser_queue.pop_front() {
+            let target = self.target(&url);
+            // Cloudflare's check rarely passes in the built-in browser; the
+            // visitor's own browser with the script takes these files.
+            if self.modsfire_in_browser && is_modsfire(&target) {
+                handed.push((target, name));
+                continue;
+            }
+            self.browser_request = Some((url, name));
+            break;
+        }
+        if !handed.is_empty() {
+            self.queue_modsfire(handed);
         }
     }
 
@@ -760,6 +844,8 @@ impl QuperUi {
         settings: &Settings,
         dlc_busy: bool,
     ) {
+        self.modsfire_in_browser = settings.modsfire_in_browser;
+        self.resolve_author_pages(ctx, runtime);
         if settings.selected_game != self.game && !self.preparing() {
             self.game = settings.selected_game;
             self.version.clear();
@@ -815,6 +901,11 @@ impl QuperUi {
                     }
                 }
                 Event::Plan(_, _) => {}
+                Event::Resolved(page, target) => {
+                    self.resolving.remove(&page);
+                    // An unresolved page stays as it is and opens in the built-in browser.
+                    self.resolved.insert(page.clone(), target.unwrap_or(page));
+                }
                 Event::Image(url, result) => {
                     if let Ok(image) = result {
                         self.images.insert(
@@ -1905,12 +1996,13 @@ impl QuperUi {
         for (row, state) in &rows {
             if *state == FileFilter::Pending
                 && let Some(url) = row.urls.first()
-                && is_modsfire(url)
+                && let target = self.target(url)
+                && is_modsfire(&target)
                 && !modsfire_files
                     .iter()
-                    .any(|(u, _): &(String, String)| u == url)
+                    .any(|(u, _): &(String, String)| *u == target)
             {
-                modsfire_files.push((url.clone(), row.name.clone()));
+                modsfire_files.push((target, row.name.clone()));
             }
         }
         if !modsfire_files.is_empty() || self.modsfire.is_some() {
@@ -2048,7 +2140,12 @@ impl QuperUi {
                     match self.file_row(ui, p, row, *state, idle) {
                         RowAction::Open => {
                             if let Some(url) = row.urls.first() {
-                                self.browser_request = Some((url.clone(), row.name.clone()));
+                                let target = self.target(url);
+                                if self.modsfire_in_browser && is_modsfire(&target) {
+                                    self.queue_modsfire(vec![(target, row.name.clone())]);
+                                } else {
+                                    self.browser_request = Some((url.clone(), row.name.clone()));
+                                }
                             }
                         }
                         RowAction::Import => {

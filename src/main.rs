@@ -1946,6 +1946,34 @@ impl Launcher {
                     ui.label(ui::text(kind, 12.0, W::Regular, p.muted));
                 });
 
+                // ModsFire hand-off.
+                settings_row(ui, &p, true, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    if ui
+                        .checkbox(
+                            &mut self.settings.modsfire_in_browser,
+                            ui::text(
+                                "Скачивать файлы ModsFire через этот браузер автоматически",
+                                15.0,
+                                W::Bold,
+                                p.text,
+                            ),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    ui.add(
+                        egui::Label::new(ui::text(
+                            "Файлы с ModsFire — и страницы авторов, которые ведут на ModsFire, — открываются по очереди в выбранном браузере вместо встроенного; скрипт нажимает кнопки сайта, а лаунчер подключает скачанное к сборке.",
+                            12.0,
+                            W::Regular,
+                            p.muted,
+                        ))
+                        .wrap(),
+                    );
+                });
+
                 // Downloads folder.
                 let folder = browsers::downloads_folder()
                     .map(|f| f.display().to_string())

@@ -96,6 +96,36 @@ pub enum Step {
     Trucky,
 }
 
+/// File hosts the launcher knows how to download from; any other site is an
+/// author's own page that links to one of them.
+pub fn is_file_host(url: &Url) -> bool {
+    matches!(
+        url.host_str().map(|h| h.trim_start_matches("www.")),
+        Some(
+            "sharemods.com"
+                | "modsfire.com"
+                | "mods.to"
+                | "wdfiles.ru"
+                | "drive.google.com"
+                | "drive.usercontent.google.com"
+                | "truckymods.io"
+                | "beta.truckymods.io"
+        )
+    )
+}
+
+/// The current download of an author's page: the first "Download"/"Скачать"
+/// link that leads to a file host. Older versions listed further down the page
+/// are ignored.
+pub fn primary_download(base: &Url, html: &str) -> Option<Url> {
+    let doc = Html::parse_document(html);
+    let label = regex::Regex::new(r"(?i)^\s*(download|скачать)\b").ok()?;
+    doc.select(&Selector::parse("a[href]").unwrap())
+        .filter(|a| label.is_match(&a.text().collect::<String>()))
+        .filter_map(|a| base.join(a.value().attr("href")?).ok())
+        .find(|url| public_url(url.as_str()).is_ok() && is_file_host(url))
+}
+
 /// Select the host's actual free form, ignoring login forms and advertising.
 pub fn page_step(base: &Url, html: &str) -> Result<Step> {
     let doc = Html::parse_document(html);
@@ -509,6 +539,28 @@ pub(super) async fn trucky_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_author_page_resolves_to_its_current_download() {
+        let base =
+            Url::parse("https://kieqw.github.io/kieqwmods.github.io/koromyslovo.html").unwrap();
+        let html = r#"<nav><a href="index.html">News</a></nav>
+            <a href="https://truckymods.io/euro-truck-simulator-2/maps/project-russia">Project Russia</a>
+            <a href="https://modsfire.com/f69b7lEnUu3pT4y" class="btn btn-download">Download (1.76 MB)</a>
+            <div class="version"><a href="https://modsfire.com/C683GWhsCv2qlR4" class="btn btn-version-download">Download</a></div>"#;
+        assert_eq!(
+            primary_download(&base, html).unwrap().as_str(),
+            "https://modsfire.com/f69b7lEnUu3pT4y"
+        );
+        assert!(
+            primary_download(&base, r#"<a href="https://example.com/x">Download</a>"#).is_none()
+        );
+        assert!(primary_download(&base, r#"<a href="https://boosty.to/a">Скачать</a>"#).is_none());
+        assert!(is_file_host(
+            &Url::parse("https://www.modsfire.com/a").unwrap()
+        ));
+        assert!(!is_file_host(&base));
+    }
     use std::sync::{Arc, Mutex};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},

@@ -385,7 +385,26 @@ impl Browser {
 const QUPER_FREE_DOWNLOAD: &str = r#"
 (() => {
     const hosts = ['sharemods.com', 'www.sharemods.com', 'modsfire.com', 'www.modsfire.com', 'mods.to', 'www.mods.to'];
-    if (!hosts.includes(location.hostname)) return;
+    if (!hosts.includes(location.hostname)) {
+        // An author's own page: follow its first "Download" link to a file host
+        // (older versions further down are ignored). Only the top page acts.
+        if (window.top !== window) return;
+        const fileHosts = /(^|\.)(sharemods\.com|modsfire\.com|mods\.to|wdfiles\.ru|drive\.google\.com|truckymods\.io)$/;
+        let followed = false;
+        const follow = setInterval(() => {
+            if (followed || document.readyState === 'loading') return;
+            const link = [...document.querySelectorAll('a[href]')].find(a => {
+                if (!/^\s*(download|скачать)\b/i.test(a.textContent)) return false;
+                try {
+                    const url = new URL(a.href, location.href);
+                    return url.protocol === 'https:' && fileHosts.test(url.hostname);
+                } catch { return false; }
+            });
+            if (link) { followed = true; clearInterval(follow); location.assign(link.href); }
+        }, 1500);
+        setTimeout(() => clearInterval(follow), 60000);
+        return;
+    }
     let acted = false;
     let readyAt = null;
     // A Cloudflare Turnstile widget hands the page a token once the visitor is
