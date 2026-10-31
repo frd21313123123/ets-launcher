@@ -23,6 +23,23 @@ pub enum Event {
     Navigate(String),
     Location(String),
     PopupRequested(String),
+    /// The page is (or stopped being) Cloudflare's full-page security check.
+    Challenge(bool),
+}
+
+/// Cloudflare's interstitial keeps the site's address; only its title tells it apart.
+pub fn is_challenge_title(title: &str) -> bool {
+    let title = title.trim().to_lowercase();
+    [
+        "just a moment",
+        "один момент",
+        "attention required",
+        "выполнение проверки",
+        "checking your browser",
+        "проверка безопасности",
+    ]
+    .iter()
+    .any(|marker| title.starts_with(marker))
 }
 
 pub struct Browser {
@@ -38,6 +55,10 @@ pub struct Browser {
     pending_popup: Option<String>,
     active: Arc<AtomicUsize>,
     auto_free: bool,
+    /// When the current page turned into Cloudflare's full-page check.
+    pub challenge: Option<std::time::Instant>,
+    /// Set when the visitor sent the page to the system browser.
+    pub external_requested: bool,
 }
 
 impl Default for Browser {
@@ -55,6 +76,8 @@ impl Default for Browser {
             pending_popup: None,
             active: Arc::new(AtomicUsize::new(0)),
             auto_free: false,
+            challenge: None,
+            external_requested: false,
         }
     }
 }
@@ -145,6 +168,7 @@ impl Browser {
         maps::https(url)?;
         self.title = entry.name.clone();
         self.url = url.into();
+        self.challenge = None;
         self.pending_popup = None;
         self.instructions = prepared
             .map(|p| p.message.clone())
@@ -167,6 +191,7 @@ impl Browser {
             let started_sender = sender.clone();
             let navigation_sender = sender.clone();
             let popup_sender = sender.clone();
+            let title_sender = sender.clone();
             let mut popup_origins = vec![url.to_owned(), entry.source.url.clone()];
             popup_origins.extend(self.alternatives.iter().map(|a| a.url.clone()));
             let completed_sender = sender;
@@ -177,6 +202,9 @@ impl Browser {
                 .with_url(url)
                 .with_initialization_script(if auto_free { QUPER_FREE_DOWNLOAD } else { "" })
                 .with_bounds(wry::Rect { position: wry::dpi::LogicalPosition::new(20.0, 170.0).into(), size: wry::dpi::LogicalSize::new(800.0, 600.0).into() })
+                .with_document_title_changed_handler(move |title| {
+                    let _ = title_sender.send(Event::Challenge(is_challenge_title(&title)));
+                })
                 .with_navigation_handler(move |url| {
                     let allowed = (url.starts_with("https://") || url == "about:blank")
                         && (!auto_free || url == "about:blank" || ets_launcher::quper::source::public_url(&url).is_ok());
@@ -298,6 +326,7 @@ impl Browser {
             }
             if ui.button("Внешний браузер ↗").clicked() {
                 let _ = open::that(&self.url);
+                self.external_requested = true;
             }
             if ui.button("Вернуться к сборкам").clicked() {
                 self.hide();
@@ -371,6 +400,7 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
     };
     let consentDeclined = false;
     let checkShown = false;
+    let generated = false;
     const timer = setInterval(() => {
         if (acted || document.readyState === 'loading') return;
         if (readyAt === null) readyAt = Date.now();
@@ -381,7 +411,10 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
             const reject = [...document.querySelectorAll('button, a[role="button"]')].find(b => visible(b) && /^(reject all|decline all|refuse all|отклонить все|отклонить)$/i.test(b.textContent.trim()));
             if (reject) { consentDeclined = true; reject.click(); }
         }
-        if ([...document.querySelectorAll('iframe[src*="captcha"], .h-captcha, .g-recaptcha')].some(visible)) return;
+        // Invisible reCAPTCHA badges (ads, login dialogs) are not a check the
+        // visitor has to pass; only a visible widget of real size waits.
+        const realCaptcha = e => visible(e) && !e.closest('.grecaptcha-badge') && !/[?&]size=invisible/.test(e.getAttribute('src') || '') && e.offsetWidth > 60 && e.offsetHeight > 40;
+        if ([...document.querySelectorAll('iframe[src*="captcha"], .h-captcha, .g-recaptcha')].some(realCaptcha)) return;
         if (turnstilePending()) {
             // Keep the check in sight in case Cloudflare asks the visitor to click it.
             const widget = document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
@@ -420,10 +453,36 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
                 acted = true; clearInterval(timer); button.click();
             }
         } else {
-            const button = [...document.querySelectorAll('a[href], button')].find(b => /^generate\s+(download\s+)?link$/i.test(b.textContent.trim()));
-            if (button && !button.disabled) { acted = true; clearInterval(timer); button.click(); }
+            // ModsFire removes the button's href, "generates" for a few seconds and
+            // then turns it into a "Download Link" leading to the next step.
+            const ready = [...document.querySelectorAll('a.download-button[href]')].find(a => /^download link$/i.test(a.textContent.trim()));
+            if (ready) {
+                const url = new URL(ready.getAttribute('href'), location.href);
+                if (url.origin === location.origin) { acted = true; clearInterval(timer); location.assign(url.href); }
+                return;
+            }
+            if (!generated) {
+                const button = [...document.querySelectorAll('a, button')].find(b => /^generate\s+(download\s+)?link$/i.test(b.textContent.trim()));
+                if (button && !button.disabled) { generated = true; button.click(); }
+            }
         }
     }, 1500);
     setTimeout(() => clearInterval(timer), 600000);
 })();
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::is_challenge_title;
+
+    #[test]
+    fn cloudflare_check_pages_are_recognised_by_title() {
+        assert!(is_challenge_title("Just a moment..."));
+        assert!(is_challenge_title("Один момент…"));
+        assert!(is_challenge_title("Attention Required! | Cloudflare"));
+        assert!(!is_challenge_title(
+            "Download file Koromyslovo Add-on for Project Russia 1.5.scs - ModsFire.com"
+        ));
+        assert!(!is_challenge_title(""));
+    }
+}

@@ -62,6 +62,18 @@ struct Detail {
     ready: Option<PathBuf>,
 }
 
+/// Files the visitor downloads in the system browser (when a site's security
+/// check does not pass inside the launcher) are taken from the Downloads folder.
+struct DownloadWatch {
+    folder: PathBuf,
+    since: std::time::SystemTime,
+    until: Instant,
+    next_scan: Instant,
+    /// Size last seen and when it last changed; a file is taken once it settles.
+    pending: BTreeMap<PathBuf, (u64, Instant)>,
+    taken: BTreeSet<PathBuf>,
+}
+
 pub struct QuperUi {
     catalog: Option<Catalog>,
     plan: Option<Plan>,
@@ -95,6 +107,7 @@ pub struct QuperUi {
     browser_current: Option<String>,
     browser_request: Option<(String, String)>,
     imports: Vec<PathBuf>,
+    downloads: Option<DownloadWatch>,
     /// Download size per build, `None` while unknown; read from cache on demand.
     sizes: BTreeMap<String, Option<Estimate>>,
     /// Build whose size is being estimated: (id, finished sources, all sources).
@@ -147,6 +160,7 @@ impl QuperUi {
             browser_current: None,
             browser_request: None,
             imports: Vec::new(),
+            downloads: None,
             sizes: BTreeMap::new(),
             sizing: None,
             size_failed: BTreeSet::new(),
@@ -192,6 +206,91 @@ impl QuperUi {
         self.browser_request = None;
         self.browser_current = None;
         self.imports.clear();
+        self.downloads = None;
+    }
+
+    /// Opens the current page in the system browser and starts taking the
+    /// downloaded file from the Downloads folder.
+    fn open_external(&mut self) {
+        let url = self.browser.url.clone();
+        if let Err(e) = open::that(&url) {
+            self.fail(format!("Не удалось открыть браузер: {e}"));
+            return;
+        }
+        self.watch_downloads();
+    }
+
+    fn watch_downloads(&mut self) {
+        let Some(folder) =
+            directories::UserDirs::new().and_then(|d| d.download_dir().map(PathBuf::from))
+        else {
+            self.fail(
+                "Не найдена папка «Загрузки». Скачанный файл добавьте через «Импорт файлов…».",
+            );
+            return;
+        };
+        self.inform(format!(
+            "Скачайте файл в открывшемся браузере — лаунчер сам заберёт его из папки {}.",
+            folder.display()
+        ));
+        let now = Instant::now();
+        let keep = self.downloads.take();
+        self.downloads = Some(DownloadWatch {
+            folder,
+            // Files that appear from now on; a little slack for clock rounding.
+            since: std::time::SystemTime::now() - Duration::from_secs(5),
+            until: now + Duration::from_secs(30 * 60),
+            next_scan: now,
+            pending: BTreeMap::new(),
+            taken: keep.map(|w| w.taken).unwrap_or_default(),
+        });
+    }
+
+    /// New finished mod archives in the Downloads folder go to the import queue.
+    fn scan_downloads(&mut self) {
+        let Some(watch) = &mut self.downloads else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= watch.until {
+            self.downloads = None;
+            return;
+        }
+        if now < watch.next_scan {
+            return;
+        }
+        watch.next_scan = now + Duration::from_secs(2);
+        let Ok(entries) = std::fs::read_dir(&watch.folder) else {
+            return;
+        };
+        let mut ready = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Browsers write .crdownload/.part files first; only the final name counts.
+            if !quper::files::allowed_filename(&name) || watch.taken.contains(&path) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() || meta.modified().is_ok_and(|m| m < watch.since) {
+                continue;
+            }
+            match watch.pending.get(&path) {
+                Some((size, changed)) if *size == meta.len() => {
+                    if changed.elapsed() >= Duration::from_secs(3) {
+                        ready.push(path);
+                    }
+                }
+                _ => {
+                    watch.pending.insert(path, (meta.len(), now));
+                }
+            }
+        }
+        for path in ready {
+            watch.pending.remove(&path);
+            watch.taken.insert(path.clone());
+            self.imports.push(path);
+        }
     }
     pub fn root(settings: &Settings) -> PathBuf {
         settings
@@ -653,8 +752,19 @@ impl QuperUi {
                 mod_browser::Event::Navigate(url) => self.browser.navigate(&url),
                 mod_browser::Event::Location(url) => self.browser.url = url,
                 mod_browser::Event::PopupRequested(url) => self.browser.popup_requested(url),
+                mod_browser::Event::Challenge(on) => {
+                    if !on {
+                        self.browser.challenge = None;
+                    } else if self.browser.challenge.is_none() {
+                        self.browser.challenge = Some(Instant::now());
+                    }
+                }
             }
         }
+        if std::mem::take(&mut self.browser.external_requested) {
+            self.watch_downloads();
+        }
+        self.scan_downloads();
         if !self.job && !self.browser.downloading() && !dlc_busy && !self.imports.is_empty() {
             let inputs = std::mem::take(&mut self.imports);
             self.start_job(ctx, runtime, settings, Some(inputs));
@@ -846,6 +956,31 @@ impl QuperUi {
                 }
             });
         });
+        if let Some(since) = self.browser.challenge {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            let message = if since.elapsed() < Duration::from_secs(20) {
+                "Сайт проверяет браузер через Cloudflare. Если на странице появилась галочка «Я человек», отметьте её — дальше лаунчер продолжит сам."
+            } else {
+                "Проверка Cloudflare не проходит во встроенном браузере? Откройте страницу в обычном браузере и скачайте файл там — лаунчер сам заберёт его из папки «Загрузки» и добавит в сборку."
+            };
+            if ui::banner(ui, p, Tone::Warn, message, Some("Открыть в браузере")) {
+                self.open_external();
+            }
+        }
+        if let Some(watch) = &self.downloads {
+            let folder = watch.folder.display().to_string();
+            if ui::banner(
+                ui,
+                p,
+                Tone::Info,
+                &format!(
+                    "Ждём скачанный файл в папке {folder}. Как только загрузка в браузере закончится, файл будет добавлен в сборку."
+                ),
+                Some("Не ждать"),
+            ) {
+                self.downloads = None;
+            }
+        }
         if let Some((tone, note)) = self.note.clone()
             && ui::banner(ui, p, tone, &note, Some("Скрыть"))
         {

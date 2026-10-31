@@ -166,6 +166,12 @@ impl eframe::App for Smoke {
                 Event::Navigate(url) => self.browser.navigate(&url),
                 Event::Location(url) => self.browser.url = url,
                 Event::PopupRequested(url) => self.browser.popup_requested(url),
+                Event::Challenge(on) => {
+                    self.browser.challenge = on.then(Instant::now);
+                    if on {
+                        let _ = std::fs::write(self.root.join("challenge.txt"), &self.browser.url);
+                    }
+                }
             }
         }
         if self.automatic && Instant::now() >= self.next_inspection {

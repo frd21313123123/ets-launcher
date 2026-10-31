@@ -1052,18 +1052,20 @@ pub fn banner(ui: &mut Ui, p: &Palette, tone: Tone, message: &str, action: Optio
                     accent,
                     2.0,
                 );
-                let reserve = if action.is_some() { 110.0 } else { 0.0 };
+                let button = action.map(|action| {
+                    Button::new(action, Kind::Warn)
+                        .height(40.0)
+                        .size(13.0)
+                        .pad(14.0)
+                });
+                // The text keeps clear of the button, whatever its label.
+                let reserve = button.as_ref().map_or(0.0, |b| b.width(ui) + 24.0);
                 ui.allocate_ui(vec2(ui.available_width() - reserve, 0.0), |ui| {
                     ui.add(egui::Label::new(text(message, 13.0, W::Regular, body)).wrap());
                 });
-                if let Some(action) = action {
+                if let Some(button) = button {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        pressed = Button::new(action, Kind::Warn)
-                            .height(40.0)
-                            .size(13.0)
-                            .pad(14.0)
-                            .show(ui, p)
-                            .clicked();
+                        pressed = button.show(ui, p).clicked();
                     });
                 }
             });
