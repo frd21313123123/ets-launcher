@@ -34,10 +34,11 @@ pub struct Settings {
     /// Where that browser saves files (`None`: the system Downloads folder).
     #[serde(default)]
     pub browser_downloads: Option<PathBuf>,
-    /// ModsFire files (also behind authors' pages) go to the system browser
-    /// queue instead of the built-in browser.
-    #[serde(default = "enabled")]
-    pub modsfire_in_browser: bool,
+    /// Files the launcher cannot download itself (ModsFire, checks on file
+    /// hosts, authors' pages) go to the system browser queue instead of the
+    /// built-in browser.
+    #[serde(default = "enabled", alias = "modsfire_in_browser")]
+    pub external_downloads: bool,
 }
 
 fn enabled() -> bool {
@@ -68,7 +69,7 @@ impl Default for Settings {
             theme: Theme::Black,
             download_browser: None,
             browser_downloads: None,
-            modsfire_in_browser: true,
+            external_downloads: true,
             output: UserDirs::new()
                 .and_then(|dirs| dirs.download_dir().map(|dir| dir.join("ETS Launcher")))
                 .unwrap_or_else(|| PathBuf::from("downloads")),

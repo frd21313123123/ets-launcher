@@ -1,5 +1,7 @@
-//! The browser script for ModsFire (Tampermonkey). It clicks the site's normal
-//! free buttons in tabs the launcher opened and never touches Cloudflare's check.
+//! The browser script (Tampermonkey) for files the launcher hands to the
+//! visitor's browser. It clicks the free download buttons of ModsFire,
+//! Sharemods, mods.to, Google Drive and authors' pages in tabs the launcher
+//! opened, and never touches Cloudflare's check.
 //! For installation it is served briefly on 127.0.0.1: Tampermonkey offers to
 //! install any address ending in `.user.js`.
 
@@ -77,7 +79,8 @@ mod tests {
         );
         assert!(SCRIPT.starts_with("// ==UserScript=="));
         assert!(SCRIPT.contains(&format!("const MARK = '{MARK}'")));
-        assert!(!SCRIPT.to_lowercase().contains("turnstile"));
+        // The Cloudflare widget is only waited for, never clicked.
+        assert!(!SCRIPT.contains("widget.click"));
     }
 
     #[test]

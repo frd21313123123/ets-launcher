@@ -66,8 +66,8 @@ struct Detail {
 
 /// Files the visitor downloads in the system browser (when a site's security
 /// check does not pass inside the launcher) are taken from the Downloads folder.
-/// ModsFire files opened one by one in the visitor's own browser, where
-/// Cloudflare's check passes normally. The next file opens once the previous
+/// Files the launcher cannot download itself, opened one by one in the
+/// visitor's own browser, where Cloudflare's checks pass normally. The next file opens once the previous
 /// one has arrived in the Downloads folder.
 struct BrowserQueue {
     pending: VecDeque<(String, String)>,
@@ -134,11 +134,11 @@ pub struct QuperUi {
     imports: Vec<PathBuf>,
     downloads: Option<DownloadWatch>,
     paste: crate::clipboard_files::PasteKey,
-    modsfire: Option<BrowserQueue>,
+    external: Option<BrowserQueue>,
     /// Author pages resolved to the file host behind them.
     resolved: BTreeMap<String, String>,
     resolving: BTreeSet<String>,
-    modsfire_in_browser: bool,
+    external_downloads: bool,
     script_help: bool,
     /// Download size per build, `None` while unknown; read from cache on demand.
     sizes: BTreeMap<String, Option<Estimate>>,
@@ -194,10 +194,10 @@ impl QuperUi {
             imports: Vec::new(),
             downloads: None,
             paste: Default::default(),
-            modsfire: None,
+            external: None,
             resolved: BTreeMap::new(),
             resolving: BTreeSet::new(),
-            modsfire_in_browser: settings.modsfire_in_browser,
+            external_downloads: settings.external_downloads,
             script_help: false,
             sizes: BTreeMap::new(),
             sizing: None,
@@ -245,7 +245,7 @@ impl QuperUi {
         self.browser_current = None;
         self.imports.clear();
         self.downloads = None;
-        self.modsfire = None;
+        self.external = None;
     }
 
     /// Starts opening the build's ModsFire files in the system browser.
@@ -297,8 +297,8 @@ impl QuperUi {
     }
 
     /// Adds ModsFire files to the browser queue, starting it when needed.
-    fn queue_modsfire(&mut self, files: Vec<(String, String)>) {
-        if let Some(queue) = &mut self.modsfire {
+    fn queue_external(&mut self, files: Vec<(String, String)>) {
+        if let Some(queue) = &mut self.external {
             for file in files {
                 let known = queue.current.as_ref().is_some_and(|(u, _)| *u == file.0)
                     || queue.pending.iter().any(|(u, _)| *u == file.0);
@@ -308,11 +308,11 @@ impl QuperUi {
                 }
             }
         } else {
-            self.start_modsfire(files);
+            self.start_external(files);
         }
     }
 
-    fn start_modsfire(&mut self, files: Vec<(String, String)>) {
+    fn start_external(&mut self, files: Vec<(String, String)>) {
         if files.is_empty() {
             return;
         }
@@ -320,23 +320,23 @@ impl QuperUi {
         if self.downloads.is_none() {
             return;
         }
-        self.modsfire = Some(BrowserQueue {
+        self.external = Some(BrowserQueue {
             total: files.len(),
             pending: files.into(),
             current: None,
             advance_at: None,
         });
-        self.open_next_modsfire();
+        self.open_next_external();
     }
 
-    fn open_next_modsfire(&mut self) {
-        let Some(queue) = &mut self.modsfire else {
+    fn open_next_external(&mut self) {
+        let Some(queue) = &mut self.external else {
             return;
         };
         queue.advance_at = None;
         let Some((url, name)) = queue.pending.pop_front() else {
             queue.current = None;
-            self.modsfire = None;
+            self.external = None;
             self.inform("Все файлы ModsFire открыты. Последние загрузки подключатся, как только появятся в «Загрузках».");
             return;
         };
@@ -346,7 +346,7 @@ impl QuperUi {
             watch.until = Instant::now() + Duration::from_secs(30 * 60);
         }
         if let Err(e) = open_in_browser(&crate::userscript::tagged(&url)) {
-            self.modsfire = None;
+            self.external = None;
             self.fail(format!("Не удалось открыть браузер: {e}"));
         }
     }
@@ -558,7 +558,7 @@ impl QuperUi {
             self.imports.push(path);
         }
         if arrived
-            && let Some(queue) = &mut self.modsfire
+            && let Some(queue) = &mut self.external
             && queue.current.is_some()
             && queue.advance_at.is_none()
         {
@@ -841,18 +841,18 @@ impl QuperUi {
         self.browser_current = None;
         let mut handed = Vec::new();
         while let Some((url, name)) = self.browser_queue.pop_front() {
-            let target = self.target(&url);
-            // Cloudflare's check rarely passes in the built-in browser; the
-            // visitor's own browser with the script takes these files.
-            if self.modsfire_in_browser && is_modsfire(&target) {
-                handed.push((target, name));
+            // Whatever the launcher could not download itself goes to the
+            // visitor's own browser with the script; Cloudflare's checks rarely
+            // pass in the built-in one.
+            if self.external_downloads {
+                handed.push((self.target(&url), name));
                 continue;
             }
             self.browser_request = Some((url, name));
             break;
         }
         if !handed.is_empty() {
-            self.queue_modsfire(handed);
+            self.queue_external(handed);
         }
     }
 
@@ -863,7 +863,7 @@ impl QuperUi {
         settings: &Settings,
         dlc_busy: bool,
     ) {
-        self.modsfire_in_browser = settings.modsfire_in_browser;
+        self.external_downloads = settings.external_downloads;
         self.resolve_author_pages(ctx, runtime);
         if settings.selected_game != self.game && !self.preparing() {
             self.game = settings.selected_game;
@@ -1058,14 +1058,14 @@ impl QuperUi {
         }
         self.scan_downloads();
         if self
-            .modsfire
+            .external
             .as_ref()
             .and_then(|q| q.advance_at)
             .is_some_and(|at| Instant::now() >= at)
         {
-            self.open_next_modsfire();
+            self.open_next_external();
         }
-        if self.modsfire.is_some() || self.downloads.is_some() {
+        if self.external.is_some() || self.downloads.is_some() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         if !self.job && !self.browser.downloading() && !dlc_busy && !self.imports.is_empty() {
@@ -2011,23 +2011,33 @@ impl QuperUi {
             .collect::<Vec<_>>();
         let count = |f: FileFilter| rows.iter().filter(|(_, s)| *s == f).count();
         let imports = count(FileFilter::Import);
-        let mut modsfire_files = Vec::new();
+        let failed = self
+            .report
+            .as_ref()
+            .map(|r| {
+                r.problems
+                    .iter()
+                    .filter_map(|p| p.url.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let mut external_files = Vec::new();
         for (row, state) in &rows {
             if *state == FileFilter::Pending
                 && let Some(url) = row.urls.first()
                 && let target = self.target(url)
-                && is_modsfire(&target)
-                && !modsfire_files
+                && (is_modsfire(&target) || row.urls.iter().any(|u| failed.contains(u)))
+                && !external_files
                     .iter()
                     .any(|(u, _): &(String, String)| *u == target)
             {
-                modsfire_files.push((target, row.name.clone()));
+                external_files.push((target, row.name.clone()));
             }
         }
-        if !modsfire_files.is_empty() || self.modsfire.is_some() {
+        if !external_files.is_empty() || self.external.is_some() {
             // The list on screen is enough; a refresh of it need not hold the queue back.
             let free = !self.preparing() && !dlc_busy;
-            self.modsfire_card(ui, p, runtime, modsfire_files, free);
+            self.external_card(ui, p, runtime, external_files, free);
         }
         if imports > 0 {
             let message = format!(
@@ -2160,8 +2170,8 @@ impl QuperUi {
                         RowAction::Open => {
                             if let Some(url) = row.urls.first() {
                                 let target = self.target(url);
-                                if self.modsfire_in_browser && is_modsfire(&target) {
-                                    self.queue_modsfire(vec![(target, row.name.clone())]);
+                                if self.external_downloads {
+                                    self.queue_external(vec![(target, row.name.clone())]);
                                 } else {
                                     self.browser_request = Some((url.clone(), row.name.clone()));
                                 }
@@ -2272,7 +2282,7 @@ impl QuperUi {
         });
     }
 
-    fn modsfire_card(
+    fn external_card(
         &mut self,
         ui: &mut egui::Ui,
         p: &Palette,
@@ -2283,7 +2293,7 @@ impl QuperUi {
         ui::card(p).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 12.0;
-            let running = self.modsfire.as_ref().map(|q| {
+            let running = self.external.as_ref().map(|q| {
                 (
                     q.current.clone(),
                     q.total - q.pending.len(),
@@ -2296,7 +2306,7 @@ impl QuperUi {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(16.0).color(p.accent));
                         ui.label(ui::text(
-                            format!("ModsFire через браузер: {opened} из {total}"),
+                            format!("Загрузка через браузер: {opened} из {total}"),
                             18.0,
                             W::Extra,
                             p.text,
@@ -2337,7 +2347,7 @@ impl QuperUi {
                             .show(ui, p)
                             .clicked()
                         {
-                            self.open_next_modsfire();
+                            self.open_next_external();
                         }
                         if Button::new("Остановить", Kind::Danger)
                             .icon(Icon::Stop)
@@ -2346,14 +2356,14 @@ impl QuperUi {
                             .show(ui, p)
                             .clicked()
                         {
-                            self.modsfire = None;
+                            self.external = None;
                         }
                     });
                 }
                 None => {
                     ui.label(ui::text(
                         format!(
-                            "ModsFire: {} {}",
+                            "Через браузер: {} {}",
                             files.len(),
                             plural(files.len(), ["файл", "файла", "файлов"])
                         ),
@@ -2363,7 +2373,7 @@ impl QuperUi {
                     ));
                     ui.add(
                         egui::Label::new(ui::text(
-                            "Сайт защищён проверкой Cloudflare, которая во встроенном браузере может не проходить. Лаунчер откроет эти файлы по одному в вашем обычном браузере, скрипт для Tampermonkey нажмёт кнопки сайта, а скачанные файлы подключатся к сборке сами. Браузер, папка загрузок и подготовка Tampermonkey — в «Настройки → Загрузка через браузер».",
+                            "Эти файлы лаунчер не может скачать сам: ModsFire и сайты с проверкой Cloudflare, а также всё, что не скачалось при «Продолжить загрузку». Лаунчер откроет их по одному в вашем браузере, скрипт для Tampermonkey нажмёт кнопки сайта, а скачанные файлы подключатся к сборке сами. Браузер, папка загрузок и подготовка Tampermonkey — в «Настройки → Загрузка через браузер».",
                             13.0,
                             W::Regular,
                             p.muted,
@@ -2380,7 +2390,7 @@ impl QuperUi {
                             .show(ui, p)
                             .clicked()
                         {
-                            self.start_modsfire(files.clone());
+                            self.start_external(files.clone());
                         }
                         if Button::new(
                             if self.script_help {

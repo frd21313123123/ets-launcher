@@ -1,10 +1,9 @@
 // ==UserScript==
-// @name         Truck Launcher — ModsFire
+// @name         Truck Launcher — загрузка модов
 // @namespace    https://github.com/frd21313123123/ets-launcher
-// @version      1.0.0
-// @description  Нажимает обычные бесплатные кнопки ModsFire во вкладках, которые открыл Truck Launcher. Проверку Cloudflare не трогает — если она попросит, отметьте её сами.
-// @match        https://modsfire.com/*
-// @match        https://www.modsfire.com/*
+// @version      2.0.0
+// @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, Google Drive, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверку Cloudflare не трогает — если она попросит, отметьте её сами.
+// @match        https://*/*
 // @grant        window.close
 // @run-at       document-idle
 // ==/UserScript==
@@ -12,50 +11,111 @@
 (() => {
     'use strict';
     // Only tabs the launcher opened: it adds this mark to the address. The mark
-    // is kept for the tab, so the following steps of the same file are handled.
+    // is kept for the tab and passed on when an author's page leads to a file host.
     const MARK = 'truck-launcher';
+    if (window.top !== window) return;
     if (location.hash.includes(MARK)) sessionStorage.setItem(MARK, '1');
     if (sessionStorage.getItem(MARK) !== '1') return;
 
-    const text = e => (e.textContent || '').trim().replace(/\s+/g, ' ');
-    const sameSite = href => {
+    const host = location.hostname.replace(/^www\./, '');
+    const text = e => (e.textContent || e.value || '').trim().replace(/\s+/g, ' ');
+    const visible = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+    const https = href => {
         try {
             const url = new URL(href, location.href);
-            return url.protocol === 'https:' && url.origin === location.origin ? url : null;
+            return url.protocol === 'https:' && !/(^|\.)boosty\.to$/.test(url.hostname) ? url : null;
         } catch {
             return null;
         }
     };
-    let generated = false;
-    let started = false;
-    const timer = setInterval(() => {
-        if (document.readyState === 'loading' || started) return;
-        // Cloudflare's own check page has none of these buttons, so nothing
-        // happens until the visitor passes it and the real page loads.
+    const fileHosts = /(^|\.)(sharemods\.com|modsfire\.com|mods\.to|wdfiles\.ru|drive\.google\.com|drive\.usercontent\.google\.com|truckymods\.io)$/;
+    // A Turnstile widget hands the page a token once the visitor is verified;
+    // forms are only sent after that. The widget itself is never touched.
+    const checkPending = () =>
+        document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]') &&
+        ![...document.querySelectorAll('input[name="cf-turnstile-response"]')].some(t => t.value.length > 20);
+    const finished = () => {
+        sessionStorage.removeItem(MARK);
+        // The download continues in the browser; the tab is no longer needed.
+        setTimeout(() => window.close(), 15000);
+    };
 
-        // Step 1: "Generate Link" (its address is removed by the site), then the
-        // same button becomes "Download Link" after the site's short timer.
-        const ready = [...document.querySelectorAll('a.download-button[href]')].find(a => /^download link$/i.test(text(a)));
-        if (ready) {
-            const url = sameSite(ready.getAttribute('href'));
-            if (url) { started = true; location.assign(url.href); }
+    let done = false;
+    let readyAt = null;
+    let consent = false;
+    const actions = new Set();
+    const once = (key, action) => {
+        if (actions.has(key)) return false;
+        actions.add(key);
+        action();
+        return true;
+    };
+    const timer = setInterval(() => {
+        if (done || document.readyState === 'loading') return;
+        if (readyAt === null) readyAt = Date.now();
+        // Cookie walls cover the page; they get the most private answer.
+        if (!consent) {
+            const reject = [...document.querySelectorAll('button, a[role="button"]')].find(b => visible(b) && /^(reject all|decline all|refuse all|отклонить все|отклонить)$/i.test(text(b)));
+            if (reject) { consent = true; reject.click(); }
+        }
+        if (checkPending()) {
+            const widget = document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
+            once('show-check', () => widget.scrollIntoView({ block: 'center' }));
             return;
         }
-        if (!generated) {
-            const generate = [...document.querySelectorAll('a, button')].find(b => /^generate\s+(download\s+)?link$/i.test(text(b)));
-            if (generate && !generate.disabled) { generated = true; generate.click(); return; }
+
+        // An author's own page: follow its first "Download" link to a file host,
+        // carrying the mark to that site.
+        if (!fileHosts.test(host)) {
+            const link = [...document.querySelectorAll('a[href]')].find(a => /^\s*(download|скачать)\b/i.test(text(a)) && https(a.href) && fileHosts.test(https(a.href).hostname));
+            if (link) {
+                done = true;
+                const url = https(link.href);
+                url.hash = MARK;
+                location.assign(url.href);
+            }
+            return;
         }
 
-        // Step 2: the free "Download" button starts the file download.
-        const download = document.querySelector('a#downloadnow[href]');
-        if (download && sameSite(download.getAttribute('href'))) {
-            started = true;
-            clearInterval(timer);
-            download.click();
-            // The download continues in the browser; the tab is no longer needed.
-            sessionStorage.removeItem(MARK);
-            setTimeout(() => window.close(), 15000);
+        if (host === 'modsfire.com') {
+            // "Generate Link" (its address removed by the site), then the same
+            // button becomes "Download Link"; the next page has "Download".
+            const ready = [...document.querySelectorAll('a.download-button[href]')].find(a => /^download link$/i.test(text(a)));
+            if (ready && https(ready.getAttribute('href'))) { done = true; location.assign(https(ready.getAttribute('href')).href); return; }
+            const generate = [...document.querySelectorAll('a, button')].find(b => /^generate\s+(download\s+)?link$/i.test(text(b)));
+            if (generate && once('generate', () => generate.click())) return;
+            const download = document.querySelector('a#downloadnow[href]');
+            if (download) { done = true; clearInterval(timer); download.click(); finished(); }
+            return;
         }
+
+        if (host === 'drive.usercontent.google.com' || host === 'drive.google.com') {
+            // The "download anyway" confirmation for large files.
+            const confirm = document.querySelector('#uc-download-link, form#download-form button, form#download-form input[type="submit"]');
+            if (confirm) { done = true; clearInterval(timer); confirm.click(); finished(); }
+            return;
+        }
+
+        // Sharemods, mods.to and other XFileSharing hosts: a direct link first.
+        const direct = document.querySelector('a#downloadnow[href], a#download_link[href]') || [...document.querySelectorAll('a[href]')].find(a => /^start download(?:\s|$)/i.test(text(a)));
+        if (direct && https(direct.href) && https(direct.href).href !== location.href) {
+            done = true; clearInterval(timer); direct.click(); finished(); return;
+        }
+        // Then the free button, after the host's own timer.
+        if (Date.now() - readyAt < 15000) return;
+        const countdown = document.querySelector('#countdown, #countdown_str, .countdown');
+        if (countdown && /\d+/.test(countdown.textContent) && Number(countdown.textContent.match(/\d+/)[0]) > 0) return;
+        if (host === 'mods.to') {
+            const start = [...document.querySelectorAll('button, a[href]')].find(b => /^start now$/i.test(text(b)));
+            if (start && !start.disabled) once('start-now', () => start.click());
+            return;
+        }
+        const form = [...document.forms].find(f => ['download1', 'download2'].includes(f.querySelector('input[name="op"]')?.value));
+        if (!form || form.querySelector('input[type="password"]')) return;
+        // `method_free` is often a hidden field; only real submit controls count.
+        const button = form.querySelector('button[name="method_free"], input[type="submit"][name="method_free"]') || [...form.querySelectorAll('button, input[type="submit"]')].find(b => !/premium|paid/i.test(text(b)) && /^(create download link|free download|start download|download)(?:\s|$)/i.test(text(b)));
+        const op = form.querySelector('input[name="op"]').value;
+        if (button && !button.disabled) once(op, () => button.click());
     }, 1000);
     setTimeout(() => clearInterval(timer), 15 * 60 * 1000);
 })();
