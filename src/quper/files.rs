@@ -96,6 +96,40 @@ pub enum Step {
     Trucky,
 }
 
+/// A part of a split archive: "pack.zip.001" is part 1 of "pack.zip",
+/// "pack.part2.rar" is part 2 of "pack.rar". Whole files give `None`.
+pub fn split_part(name: &str) -> Option<(String, u32)> {
+    let lower = name.to_ascii_lowercase();
+    if let Some((base, number)) = lower.rsplit_once('.')
+        && number.len() == 3
+        && number.bytes().all(|b| b.is_ascii_digit())
+        && !base.is_empty()
+    {
+        return Some((base.to_owned(), number.parse().ok()?));
+    }
+    let stem = lower.strip_suffix(".rar")?;
+    let (base, number) = stem.rsplit_once(".part")?;
+    if base.is_empty() || number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((format!("{base}.rar"), number.parse().ok()?))
+}
+
+/// A browser's unfinished download (Chrome, Edge, Firefox, Zen, Opera, Safari).
+pub fn unfinished_download(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".crdownload",
+        ".part",
+        ".partial",
+        ".download",
+        ".opdownload",
+        ".tmp",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix))
+}
+
 /// The original name of a file a browser saved again under a numbered name:
 /// "mod(1)" or "mod (2)" gives "mod". Other names give `None`.
 pub fn browser_copy_base(stem: &str) -> Option<&str> {
@@ -551,6 +585,24 @@ pub(super) async fn trucky_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_archive_parts_are_recognised() {
+        assert_eq!(
+            split_part("ProMods.zip.001"),
+            Some(("promods.zip".into(), 1))
+        );
+        assert_eq!(
+            split_part("promods.7z.012"),
+            Some(("promods.7z".into(), 12))
+        );
+        assert_eq!(split_part("map.part2.rar"), Some(("map.rar".into(), 2)));
+        assert_eq!(split_part("map.rar"), None);
+        assert_eq!(split_part("promods-eu-map-v284.scs"), None);
+        assert!(unfinished_download("promods.zip.001.crdownload"));
+        assert!(unfinished_download("promods.zip.002.part"));
+        assert!(!unfinished_download("map.part2.rar"));
+    }
 
     #[test]
     fn numbered_browser_copies_give_the_original_name() {

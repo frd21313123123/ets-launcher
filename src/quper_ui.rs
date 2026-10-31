@@ -515,9 +515,20 @@ impl QuperUi {
             return;
         };
         let mut ready = Vec::new();
+        // Split archives (ProMods ships "….zip.001", "….002"…) are taken only
+        // once every part is there and no download is still running.
+        let mut parts: BTreeMap<String, BTreeMap<u32, PathBuf>> = BTreeMap::new();
+        let mut downloading = false;
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
+            if quper::files::unfinished_download(&name) {
+                downloading = true;
+                continue;
+            }
+            if let Some((base, number)) = quper::files::split_part(&name) {
+                parts.entry(base).or_default().insert(number, path.clone());
+            }
             // Browsers write .crdownload/.part files first; only the final name counts.
             if !quper::files::allowed_filename(&name) || watch.taken.contains(&path) {
                 continue;
@@ -551,6 +562,22 @@ impl QuperUi {
                 }
             }
         }
+        let settled: BTreeSet<PathBuf> = ready.iter().cloned().collect();
+        ready.retain(|path| {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            let Some((base, _)) = quper::files::split_part(name) else {
+                return true;
+            };
+            let group = &parts[&base];
+            let contiguous = group.keys().copied().eq(1..=group.len() as u32);
+            let all_settled = group
+                .values()
+                .all(|part| settled.contains(part) || watch.taken.contains(part));
+            !downloading && contiguous && all_settled
+        });
         let arrived = !ready.is_empty();
         for path in ready {
             watch.pending.remove(&path);
