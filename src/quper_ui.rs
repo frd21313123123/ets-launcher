@@ -64,6 +64,51 @@ struct Detail {
 
 /// Files the visitor downloads in the system browser (when a site's security
 /// check does not pass inside the launcher) are taken from the Downloads folder.
+/// ModsFire files opened one by one in the visitor's own browser, where
+/// Cloudflare's check passes normally. The next file opens once the previous
+/// one has arrived in the Downloads folder.
+struct BrowserQueue {
+    pending: VecDeque<(String, String)>,
+    current: Option<(String, String)>,
+    total: usize,
+    /// Set when a file arrived; the next page opens shortly after.
+    advance_at: Option<Instant>,
+}
+
+fn is_modsfire(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h.trim_start_matches("www.") == "modsfire.com")
+        })
+        .unwrap_or(false)
+}
+
+/// Opens an address in the system browser. Debug builds can log it instead
+/// (`ETS_LAUNCHER_OPEN_LOG`) so the queue is testable without a browser.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(debug_assertions)]
+    if let Some(log) = std::env::var_os("ETS_LAUNCHER_OPEN_LOG") {
+        use std::io::Write;
+        return std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .and_then(|mut f| writeln!(f, "{url}"));
+    }
+    open::that(url)
+}
+
+/// The Downloads folder; debug builds can point elsewhere (`ETS_LAUNCHER_DOWNLOADS_DIR`).
+fn downloads_folder() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(folder) = std::env::var_os("ETS_LAUNCHER_DOWNLOADS_DIR") {
+        return Some(folder.into());
+    }
+    directories::UserDirs::new().and_then(|d| d.download_dir().map(PathBuf::from))
+}
+
 struct DownloadWatch {
     folder: PathBuf,
     since: std::time::SystemTime,
@@ -109,6 +154,8 @@ pub struct QuperUi {
     imports: Vec<PathBuf>,
     downloads: Option<DownloadWatch>,
     paste: crate::clipboard_files::PasteKey,
+    modsfire: Option<BrowserQueue>,
+    script_help: bool,
     /// Download size per build, `None` while unknown; read from cache on demand.
     sizes: BTreeMap<String, Option<Estimate>>,
     /// Build whose size is being estimated: (id, finished sources, all sources).
@@ -163,6 +210,8 @@ impl QuperUi {
             imports: Vec::new(),
             downloads: None,
             paste: Default::default(),
+            modsfire: None,
+            script_help: false,
             sizes: BTreeMap::new(),
             sizing: None,
             size_failed: BTreeSet::new(),
@@ -209,6 +258,56 @@ impl QuperUi {
         self.browser_current = None;
         self.imports.clear();
         self.downloads = None;
+        self.modsfire = None;
+    }
+
+    /// Starts opening the build's ModsFire files in the system browser.
+    fn start_modsfire(&mut self, files: Vec<(String, String)>) {
+        if files.is_empty() {
+            return;
+        }
+        self.watch_downloads();
+        if self.downloads.is_none() {
+            return;
+        }
+        self.modsfire = Some(BrowserQueue {
+            total: files.len(),
+            pending: files.into(),
+            current: None,
+            advance_at: None,
+        });
+        self.open_next_modsfire();
+    }
+
+    fn open_next_modsfire(&mut self) {
+        let Some(queue) = &mut self.modsfire else {
+            return;
+        };
+        queue.advance_at = None;
+        let Some((url, name)) = queue.pending.pop_front() else {
+            queue.current = None;
+            self.modsfire = None;
+            self.inform("Все файлы ModsFire открыты. Последние загрузки подключатся, как только появятся в «Загрузках».");
+            return;
+        };
+        queue.current = Some((url.clone(), name));
+        // A long queue keeps the Downloads folder watched while it runs.
+        if let Some(watch) = &mut self.downloads {
+            watch.until = Instant::now() + Duration::from_secs(30 * 60);
+        }
+        if let Err(e) = open_in_browser(&crate::userscript::tagged(&url)) {
+            self.modsfire = None;
+            self.fail(format!("Не удалось открыть браузер: {e}"));
+        }
+    }
+
+    fn install_script(&mut self, runtime: &Runtime) {
+        match crate::userscript::serve(runtime).and_then(|url| Ok(open_in_browser(&url)?)) {
+            Ok(()) => self.inform(
+                "В браузере откроется окно Tampermonkey — нажмите «Установить». Если вместо него показан текст скрипта, сначала установите Tampermonkey и повторите.",
+            ),
+            Err(e) => self.fail(format!("Не удалось открыть установку скрипта: {e}")),
+        }
     }
 
     /// Archives and packages the import accepts, for file dialogs.
@@ -312,7 +411,7 @@ impl QuperUi {
     /// downloaded file from the Downloads folder.
     fn open_external(&mut self) {
         let url = self.browser.url.clone();
-        if let Err(e) = open::that(&url) {
+        if let Err(e) = open_in_browser(&url) {
             self.fail(format!("Не удалось открыть браузер: {e}"));
             return;
         }
@@ -320,9 +419,7 @@ impl QuperUi {
     }
 
     fn watch_downloads(&mut self) {
-        let Some(folder) =
-            directories::UserDirs::new().and_then(|d| d.download_dir().map(PathBuf::from))
-        else {
+        let Some(folder) = downloads_folder() else {
             self.fail(
                 "Не найдена папка «Загрузки». Скачанный файл добавьте через «Импорт файлов…».",
             );
@@ -385,10 +482,18 @@ impl QuperUi {
                 }
             }
         }
+        let arrived = !ready.is_empty();
         for path in ready {
             watch.pending.remove(&path);
             watch.taken.insert(path.clone());
             self.imports.push(path);
+        }
+        if arrived
+            && let Some(queue) = &mut self.modsfire
+            && queue.current.is_some()
+            && queue.advance_at.is_none()
+        {
+            queue.advance_at = Some(now + Duration::from_secs(2));
         }
     }
     pub fn root(settings: &Settings) -> PathBuf {
@@ -864,6 +969,17 @@ impl QuperUi {
             self.watch_downloads();
         }
         self.scan_downloads();
+        if self
+            .modsfire
+            .as_ref()
+            .and_then(|q| q.advance_at)
+            .is_some_and(|at| Instant::now() >= at)
+        {
+            self.open_next_modsfire();
+        }
+        if self.modsfire.is_some() || self.downloads.is_some() {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         if !self.job && !self.browser.downloading() && !dlc_busy && !self.imports.is_empty() {
             let inputs = std::mem::take(&mut self.imports);
             self.start_job(ctx, runtime, settings, Some(inputs));
@@ -1807,6 +1923,23 @@ impl QuperUi {
             .collect::<Vec<_>>();
         let count = |f: FileFilter| rows.iter().filter(|(_, s)| *s == f).count();
         let imports = count(FileFilter::Import);
+        let mut modsfire_files = Vec::new();
+        for (row, state) in &rows {
+            if *state == FileFilter::Pending
+                && let Some(url) = row.urls.first()
+                && is_modsfire(url)
+                && !modsfire_files
+                    .iter()
+                    .any(|(u, _): &(String, String)| u == url)
+            {
+                modsfire_files.push((url.clone(), row.name.clone()));
+            }
+        }
+        if !modsfire_files.is_empty() || self.modsfire.is_some() {
+            // The list on screen is enough; a refresh of it need not hold the queue back.
+            let free = !self.preparing() && !dlc_busy;
+            self.modsfire_card(ui, p, runtime, modsfire_files, free);
+        }
         if imports > 0 {
             let message = format!(
                 "{imports} {} нужно импортировать вручную — у них нет публичной ссылки или ссылка ведёт на Boosty.",
@@ -2041,6 +2174,195 @@ impl QuperUi {
                 if let Ok(path) = maps::config_path(&format!("quper-size-{}.json", combo.id)) {
                     let _ = std::fs::remove_file(path);
                 }
+            }
+        });
+    }
+
+    fn modsfire_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Palette,
+        runtime: &Runtime,
+        files: Vec<(String, String)>,
+        idle: bool,
+    ) {
+        ui::card(p).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 12.0;
+            let running = self.modsfire.as_ref().map(|q| {
+                (
+                    q.current.clone(),
+                    q.total - q.pending.len(),
+                    q.total,
+                    q.advance_at.is_some(),
+                )
+            });
+            match running {
+                Some((current, opened, total, arrived)) => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(16.0).color(p.accent));
+                        ui.label(ui::text(
+                            format!("ModsFire через браузер: {opened} из {total}"),
+                            18.0,
+                            W::Extra,
+                            p.text,
+                        ));
+                    });
+                    let name = current.as_ref().map(|(_, n)| n.as_str()).unwrap_or("—");
+                    ui.add(
+                        egui::Label::new(ui::text(
+                            if arrived {
+                                format!("Файл «{name}» получен, открываем следующий…")
+                            } else {
+                                format!(
+                                    "В браузере открыт «{name}». Скрипт нажмёт кнопки сайта; если Cloudflare попросит, отметьте «Я человек». Как только файл появится в «Загрузках», лаунчер подключит его и откроет следующий."
+                                )
+                            },
+                            13.0,
+                            W::Regular,
+                            p.muted,
+                        ))
+                        .wrap(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        if let Some((url, _)) = &current
+                            && Button::new("Открыть ещё раз", Kind::Ghost)
+                                .icon(Icon::External)
+                                .height(40.0)
+                                .size(13.0)
+                                .show(ui, p)
+                                .clicked()
+                            && let Err(e) = open_in_browser(&crate::userscript::tagged(url))
+                        {
+                            self.fail(format!("Не удалось открыть браузер: {e}"));
+                        }
+                        if Button::new("Следующий файл", Kind::Ghost)
+                            .height(40.0)
+                            .size(13.0)
+                            .show(ui, p)
+                            .clicked()
+                        {
+                            self.open_next_modsfire();
+                        }
+                        if Button::new("Остановить", Kind::Danger)
+                            .icon(Icon::Stop)
+                            .height(40.0)
+                            .size(13.0)
+                            .show(ui, p)
+                            .clicked()
+                        {
+                            self.modsfire = None;
+                        }
+                    });
+                }
+                None => {
+                    ui.label(ui::text(
+                        format!(
+                            "ModsFire: {} {}",
+                            files.len(),
+                            plural(files.len(), ["файл", "файла", "файлов"])
+                        ),
+                        18.0,
+                        W::Extra,
+                        p.text,
+                    ));
+                    ui.add(
+                        egui::Label::new(ui::text(
+                            "Сайт защищён проверкой Cloudflare, которая во встроенном браузере может не проходить. Лаунчер откроет эти файлы по одному в вашем обычном браузере, скрипт для Tampermonkey нажмёт кнопки сайта, а скачанные файлы подключатся к сборке сами.",
+                            13.0,
+                            W::Regular,
+                            p.muted,
+                        ))
+                        .wrap(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        if Button::new("Скачать через браузер", Kind::Primary)
+                            .icon(Icon::Download)
+                            .height(40.0)
+                            .size(13.0)
+                            .enabled(idle)
+                            .show(ui, p)
+                            .clicked()
+                        {
+                            self.start_modsfire(files.clone());
+                        }
+                        if Button::new(
+                            if self.script_help {
+                                "Скрыть инструкцию"
+                            } else {
+                                "Скрипт для браузера…"
+                            },
+                            Kind::Ghost,
+                        )
+                        .height(40.0)
+                        .size(13.0)
+                        .show(ui, p)
+                        .clicked()
+                        {
+                            self.script_help = !self.script_help;
+                        }
+                    });
+                }
+            }
+            if self.script_help {
+                ui::inset(p)
+                    .inner_margin(Margin::symmetric(18, 14))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        ui.label(ui::text("Скрипт ставится один раз", 14.0, W::Bold, p.text));
+                        for step in [
+                            "1. Установите расширение Tampermonkey в браузер, который открывается по умолчанию.",
+                            "2. Chrome и Edge: в настройках расширения Tampermonkey включите «Разрешить пользовательские скрипты» (в старых версиях — режим разработчика на странице расширений).",
+                            "3. Нажмите «Установить скрипт» и подтвердите установку в окне Tampermonkey.",
+                        ] {
+                            ui.add(
+                                egui::Label::new(ui::text(step, 12.0, W::Regular, p.text2)).wrap(),
+                            );
+                        }
+                        ui.add(
+                            egui::Label::new(ui::text(
+                                "Скрипт работает только во вкладках, которые открыл лаунчер, и нажимает лишь бесплатные кнопки ModsFire. Проверку Cloudflare он не трогает. Без скрипта очередь тоже работает — кнопки на сайте нужно будет нажать самому.",
+                                12.0,
+                                W::Regular,
+                                p.muted,
+                            ))
+                            .wrap(),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                            if Button::new("Сайт Tampermonkey", Kind::Ghost)
+                                .trailing(Icon::External)
+                                .height(36.0)
+                                .size(13.0)
+                                .show(ui, p)
+                                .clicked()
+                                && let Err(e) = open_in_browser("https://www.tampermonkey.net/")
+                            {
+                                self.fail(format!("Не удалось открыть браузер: {e}"));
+                            }
+                            if Button::new("Установить скрипт", Kind::Primary)
+                                .height(36.0)
+                                .size(13.0)
+                                .show(ui, p)
+                                .clicked()
+                            {
+                                self.install_script(runtime);
+                            }
+                            if Button::new("Скопировать скрипт", Kind::Ghost)
+                                .height(36.0)
+                                .size(13.0)
+                                .show(ui, p)
+                                .on_hover_text("Для ручной установки: Tampermonkey → «Создать новый скрипт» → вставить")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(crate::userscript::SCRIPT.to_owned());
+                                self.inform("Скрипт скопирован. В Tampermonkey создайте новый скрипт, вставьте текст и сохраните.");
+                            }
+                        });
+                    });
             }
         });
     }

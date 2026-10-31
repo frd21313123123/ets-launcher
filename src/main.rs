@@ -7,6 +7,7 @@ mod quper_ui;
 mod ui;
 #[cfg(debug_assertions)]
 mod ui_script;
+mod userscript;
 
 use anyhow::Context;
 
