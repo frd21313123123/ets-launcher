@@ -166,12 +166,6 @@ impl eframe::App for Smoke {
                 Event::Navigate(url) => self.browser.navigate(&url),
                 Event::Location(url) => self.browser.url = url,
                 Event::PopupRequested(url) => self.browser.popup_requested(url),
-                Event::Challenge(on) => {
-                    self.browser.challenge = on.then(Instant::now);
-                    if on {
-                        let _ = std::fs::write(self.root.join("challenge.txt"), &self.browser.url);
-                    }
-                }
             }
         }
         if self.automatic && Instant::now() >= self.next_inspection {
@@ -188,6 +182,9 @@ impl eframe::App for Smoke {
             ui.label("Проверка WebView2…");
             if self.prepared.is_some() || self.automatic {
                 self.browser.show(ui);
+                if self.browser.challenge.is_some() && !self.root.join("challenge.txt").exists() {
+                    let _ = std::fs::write(self.root.join("challenge.txt"), &self.browser.url);
+                }
             }
         });
     }

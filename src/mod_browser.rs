@@ -23,8 +23,6 @@ pub enum Event {
     Navigate(String),
     Location(String),
     PopupRequested(String),
-    /// The page is (or stopped being) Cloudflare's full-page security check.
-    Challenge(bool),
 }
 
 /// Cloudflare's interstitial keeps the site's address; only its title tells it apart.
@@ -47,6 +45,10 @@ pub struct Browser {
     view: Option<wry::WebView>,
     #[cfg(windows)]
     context: Option<wry::WebContext>,
+    #[cfg(windows)]
+    challenge_state: Arc<std::sync::Mutex<Option<bool>>>,
+    #[cfg(windows)]
+    next_challenge_check: std::time::Instant,
     pub visible: bool,
     pub title: String,
     pub url: String,
@@ -55,7 +57,7 @@ pub struct Browser {
     pending_popup: Option<String>,
     active: Arc<AtomicUsize>,
     auto_free: bool,
-    /// When the current page turned into Cloudflare's full-page check.
+    /// When a full-page check or an unfinished CAPTCHA was first observed.
     pub challenge: Option<std::time::Instant>,
     /// Set when the visitor sent the page to the system browser.
     pub external_requested: bool,
@@ -68,6 +70,10 @@ impl Default for Browser {
             view: None,
             #[cfg(windows)]
             context: None,
+            #[cfg(windows)]
+            challenge_state: Default::default(),
+            #[cfg(windows)]
+            next_challenge_check: std::time::Instant::now(),
             visible: false,
             title: String::new(),
             url: String::new(),
@@ -169,6 +175,7 @@ impl Browser {
         self.title = entry.name.clone();
         self.url = url.into();
         self.challenge = None;
+        self.external_requested = false;
         self.pending_popup = None;
         self.instructions = prepared
             .map(|p| p.message.clone())
@@ -191,20 +198,27 @@ impl Browser {
             let started_sender = sender.clone();
             let navigation_sender = sender.clone();
             let popup_sender = sender.clone();
-            let title_sender = sender.clone();
             let mut popup_origins = vec![url.to_owned(), entry.source.url.clone()];
             popup_origins.extend(self.alternatives.iter().map(|a| a.url.clone()));
             let completed_sender = sender;
             let auto_free = self.auto_free;
             let active = self.active.clone();
             let completed_active = active.clone();
+            self.challenge_state = Default::default();
+            self.next_challenge_check = std::time::Instant::now();
+            let initialization = if auto_free {
+                // WebView2 also injects initialization scripts into subframes.
+                // Keep automation outside the CAPTCHA provider's own frames.
+                format!(
+                    "(() => {{ if (window.top !== window) return; const captchaPending = {CAPTCHA_PENDING}; {QUPER_FREE_DOWNLOAD} }})()"
+                )
+            } else {
+                String::new()
+            };
             let webview = wry::WebViewBuilder::new_with_web_context(context)
                 .with_url(url)
-                .with_initialization_script(if auto_free { QUPER_FREE_DOWNLOAD } else { "" })
+                .with_initialization_script(initialization)
                 .with_bounds(wry::Rect { position: wry::dpi::LogicalPosition::new(20.0, 170.0).into(), size: wry::dpi::LogicalSize::new(800.0, 600.0).into() })
-                .with_document_title_changed_handler(move |title| {
-                    let _ = title_sender.send(Event::Challenge(is_challenge_title(&title)));
-                })
                 .with_navigation_handler(move |url| {
                     let allowed = (url.starts_with("https://") || url == "about:blank")
                         && (!auto_free || url == "about:blank" || ets_launcher::quper::source::public_url(&url).is_ok());
@@ -288,15 +302,73 @@ impl Browser {
 
     pub fn cancel(&mut self) {
         self.hide();
+        self.challenge = None;
+        self.external_requested = false;
         #[cfg(windows)]
         {
             self.view = None;
+            self.challenge_state = Default::default();
         }
         self.active.store(0, Ordering::Relaxed);
     }
 
+    /// Use the configured browser and retain the queue's userscript marker.
+    /// Only a successful launch starts the Downloads-folder watcher.
+    pub fn open_external(&mut self) -> Result<()> {
+        maps::https(&self.url)?;
+        crate::browsers::open_url(&crate::userscript::tagged(&self.url))?;
+        self.external_requested = true;
+        Ok(())
+    }
+
+    /// Read only public check state; no native IPC bridge or response tokens
+    /// are exposed. Replacing the state on open/cancel ignores late callbacks
+    /// from the previous page's WebView.
+    fn check_challenge(&mut self) {
+        #[cfg(windows)]
+        {
+            use std::time::{Duration, Instant};
+            let taken = self
+                .challenge_state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            if let Some(pending) = taken {
+                if pending {
+                    self.challenge.get_or_insert_with(Instant::now);
+                } else {
+                    self.challenge = None;
+                }
+            }
+            if Instant::now() < self.next_challenge_check {
+                return;
+            }
+            self.next_challenge_check = Instant::now() + Duration::from_secs(1);
+            if let Some(view) = &self.view {
+                let state = self.challenge_state.clone();
+                let script = format!(
+                    "(() => {{ if (document.readyState === 'loading') return null; return {{title: document.title, pending: ({CAPTCHA_PENDING})()}}; }})()"
+                );
+                let _ = view.evaluate_script_with_callback(&script, move |data| {
+                    #[derive(serde::Deserialize)]
+                    struct Check {
+                        title: String,
+                        pending: bool,
+                    }
+                    if let Ok(check) = serde_json::from_str::<Check>(&data) {
+                        *state.lock().unwrap_or_else(|p| p.into_inner()) =
+                            Some(check.pending || is_challenge_title(&check.title));
+                    }
+                });
+            }
+        }
+    }
+
     pub fn show(&mut self, ui: &mut eframe::egui::Ui) {
         use eframe::egui;
+        self.check_challenge();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(1));
         ui.horizontal_wrapped(|ui| {
             ui.strong(&self.title);
             if ui.button("← Назад").clicked() {
@@ -324,9 +396,10 @@ impl Browser {
                     let _ = view.evaluate_script(script);
                 }
             }
-            if ui.button("Внешний браузер ↗").clicked() {
-                let _ = open::that(&self.url);
-                self.external_requested = true;
+            if ui.button("Внешний браузер ↗").clicked()
+                && let Err(error) = self.open_external()
+            {
+                self.instructions = format!("Не удалось открыть браузер: {error}");
             }
             if ui.button("Вернуться к сборкам").clicked() {
                 self.hide();
@@ -382,6 +455,8 @@ impl Browser {
     }
 }
 
+const CAPTCHA_PENDING: &str = include_str!("../assets/browser/captcha-pending.js");
+
 const QUPER_FREE_DOWNLOAD: &str = r#"
 (() => {
     const hosts = ['sharemods.com', 'www.sharemods.com', 'modsfire.com', 'www.modsfire.com', 'mods.to', 'www.mods.to'];
@@ -393,6 +468,7 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
         let followed = false;
         const follow = setInterval(() => {
             if (followed || document.readyState === 'loading') return;
+            if (captchaPending()) return;
             const link = [...document.querySelectorAll('a[href]')].find(a => {
                 if (!/^\s*(download|скачать)\b/i.test(a.textContent)) return false;
                 try {
@@ -407,16 +483,6 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
     }
     let acted = false;
     let readyAt = null;
-    // A Cloudflare Turnstile widget hands the page a token once the visitor is
-    // verified. The host rejects a form sent without it and shows the check
-    // again, so every action waits for the token. The widget itself is never
-    // touched: if Cloudflare asks for a click, the visitor makes it.
-    const turnstilePending = () => {
-        const widgets = document.querySelectorAll('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
-        if (!widgets.length) return false;
-        const tokens = [...document.querySelectorAll('input[name="cf-turnstile-response"]')];
-        return !tokens.some(t => t.value && t.value.length > 20);
-    };
     let consentDeclined = false;
     let checkShown = false;
     let generated = false;
@@ -430,13 +496,9 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
             const reject = [...document.querySelectorAll('button, a[role="button"]')].find(b => visible(b) && /^(reject all|decline all|refuse all|отклонить все|отклонить)$/i.test(b.textContent.trim()));
             if (reject) { consentDeclined = true; reject.click(); }
         }
-        // Invisible reCAPTCHA badges (ads, login dialogs) are not a check the
-        // visitor has to pass; only a visible widget of real size waits.
-        const realCaptcha = e => visible(e) && !e.closest('.grecaptcha-badge') && !/[?&]size=invisible/.test(e.getAttribute('src') || '') && e.offsetWidth > 60 && e.offsetHeight > 40;
-        if ([...document.querySelectorAll('iframe[src*="captcha"], .h-captcha, .g-recaptcha')].some(realCaptcha)) return;
-        if (turnstilePending()) {
+        if (captchaPending()) {
             // Keep the check in sight in case Cloudflare asks the visitor to click it.
-            const widget = document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
+            const widget = document.querySelector('.cf-turnstile, .g-recaptcha, .h-captcha, iframe[src*="challenges.cloudflare.com"], iframe[src*="/recaptcha/"], iframe[src*="hcaptcha.com"]');
             if (!checkShown && widget) { checkShown = true; widget.scrollIntoView({ block: 'center' }); }
             return;
         }
@@ -492,7 +554,7 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
 
 #[cfg(test)]
 mod tests {
-    use super::is_challenge_title;
+    use super::{Browser, is_challenge_title};
 
     #[test]
     fn cloudflare_check_pages_are_recognised_by_title() {
@@ -503,5 +565,42 @@ mod tests {
             "Download file Koromyslovo Add-on for Project Russia 1.5.scs - ModsFire.com"
         ));
         assert!(!is_challenge_title(""));
+    }
+
+    #[test]
+    fn invalid_handoff_does_not_start_watching_downloads() {
+        let mut browser = Browser {
+            url: "about:blank".into(),
+            ..Default::default()
+        };
+        assert!(browser.open_external().is_err());
+        assert!(!browser.external_requested);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn check_lifecycle_ignores_late_callbacks_from_a_cancelled_view() {
+        use std::time::{Duration, Instant};
+        let mut browser = Browser {
+            next_challenge_check: Instant::now() + Duration::from_secs(60),
+            ..Default::default()
+        };
+        *browser.challenge_state.lock().unwrap() = Some(true);
+        browser.check_challenge();
+        let since = browser.challenge.unwrap();
+        *browser.challenge_state.lock().unwrap() = Some(true);
+        browser.check_challenge();
+        assert_eq!(browser.challenge, Some(since));
+        *browser.challenge_state.lock().unwrap() = Some(false);
+        browser.check_challenge();
+        assert!(browser.challenge.is_none());
+
+        let old_check = browser.challenge_state.clone();
+        browser.external_requested = true;
+        browser.cancel();
+        *old_check.lock().unwrap() = Some(true);
+        browser.check_challenge();
+        assert!(browser.challenge.is_none());
+        assert!(!browser.external_requested);
     }
 }

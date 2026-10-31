@@ -457,15 +457,12 @@ impl QuperUi {
         }
     }
 
-    /// Opens the current page in the system browser and starts taking the
+    /// Opens the current page in the selected browser and starts taking the
     /// downloaded file from the Downloads folder.
     fn open_external(&mut self) {
-        let url = self.browser.url.clone();
-        if let Err(e) = open_in_browser(&url) {
+        if let Err(e) = self.browser.open_external() {
             self.fail(format!("Не удалось открыть браузер: {e}"));
-            return;
         }
-        self.watch_downloads();
     }
 
     fn watch_downloads(&mut self) {
@@ -1083,13 +1080,6 @@ impl QuperUi {
                 mod_browser::Event::Navigate(url) => self.browser.navigate(&url),
                 mod_browser::Event::Location(url) => self.browser.url = url,
                 mod_browser::Event::PopupRequested(url) => self.browser.popup_requested(url),
-                mod_browser::Event::Challenge(on) => {
-                    if !on {
-                        self.browser.challenge = None;
-                    } else if self.browser.challenge.is_none() {
-                        self.browser.challenge = Some(Instant::now());
-                    }
-                }
             }
         }
         if std::mem::take(&mut self.browser.external_requested) {
@@ -1317,9 +1307,9 @@ impl QuperUi {
         if let Some(since) = self.browser.challenge {
             ui.ctx().request_repaint_after(Duration::from_secs(1));
             let message = if since.elapsed() < Duration::from_secs(20) {
-                "Сайт проверяет браузер через Cloudflare. Если на странице появилась галочка «Я человек», отметьте её — дальше лаунчер продолжит сам."
+                "Сайт ожидает проверку CAPTCHA или Cloudflare. Пройдите её на странице — дальше лаунчер продолжит сам."
             } else {
-                "Проверка Cloudflare не проходит во встроенном браузере? Откройте страницу в обычном браузере и скачайте файл там — лаунчер сам заберёт его из папки «Загрузки». Или перетащите уже скачанный файл в окно лаунчера."
+                "Проверка повторяется или не загружается? Откройте страницу в выбранном браузере и пройдите её там — лаунчер сам заберёт скачанный файл из папки загрузок."
             };
             if ui::banner(ui, p, Tone::Warn, message, Some("Открыть в браузере")) {
                 self.open_external();

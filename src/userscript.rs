@@ -79,6 +79,21 @@ mod tests {
         );
         assert!(SCRIPT.starts_with("// ==UserScript=="));
         assert!(SCRIPT.contains(&format!("const MARK = '{MARK}'")));
+        // The version shown in the tab title follows the header.
+        let header = SCRIPT
+            .lines()
+            .find_map(|l| l.strip_prefix("// @version"))
+            .unwrap()
+            .trim();
+        let shown = SCRIPT
+            .split("const VERSION = '")
+            .nth(1)
+            .and_then(|r| r.split('\'').next())
+            .unwrap();
+        assert!(
+            header.starts_with(&format!("{shown}.")),
+            "{header} vs {shown}"
+        );
         // The Cloudflare widget is only waited for, never clicked.
         assert!(!SCRIPT.contains("widget.click"));
     }
