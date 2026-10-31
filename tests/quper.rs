@@ -506,3 +506,24 @@ async fn ats_local_profile_uses_the_ats_folder_and_module() {
         "uset r_buffer_page_size \"30\"\n"
     );
 }
+
+#[tokio::test]
+async fn a_numbered_browser_copy_counts_as_the_mod_it_was_saved_from() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let plan = plan();
+    let report = library
+        .import(
+            &plan,
+            &[scs(inputs.path(), "addon(1).scs", 2)],
+            &transfer(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.missing, ["base"]);
+    let state = library.state(&plan.combo).unwrap();
+    assert_eq!(state.packages["addon"].filename, "addon.scs");
+    assert!(!state.packages.contains_key("addon(1)"));
+}

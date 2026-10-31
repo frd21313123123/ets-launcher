@@ -494,6 +494,11 @@ impl QuperUi {
 
     /// New finished mod archives in the Downloads folder go to the import queue.
     fn scan_downloads(&mut self) {
+        let missing = self
+            .detail
+            .as_ref()
+            .map(|d| d.missing.clone())
+            .unwrap_or_default();
         let Some(watch) = &mut self.downloads else {
             return;
         };
@@ -518,7 +523,21 @@ impl QuperUi {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
-            if !meta.is_file() || meta.modified().is_ok_and(|m| m < watch.since) {
+            if !meta.is_file() {
+                continue;
+            }
+            // New files are taken; an older one only when it is a mod the open
+            // build still misses (downloaded earlier, possibly as "mod(1).scs").
+            let fresh = !meta.modified().is_ok_and(|m| m < watch.since);
+            let wanted = || {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                let stem = quper::files::browser_copy_base(stem).unwrap_or(stem);
+                missing.iter().any(|id| id.eq_ignore_ascii_case(stem))
+            };
+            if !fresh && !wanted() {
                 continue;
             }
             match watch.pending.get(&path) {

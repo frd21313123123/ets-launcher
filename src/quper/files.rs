@@ -96,6 +96,18 @@ pub enum Step {
     Trucky,
 }
 
+/// The original name of a file a browser saved again under a numbered name:
+/// "mod(1)" or "mod (2)" gives "mod". Other names give `None`.
+pub fn browser_copy_base(stem: &str) -> Option<&str> {
+    let open = stem.strip_suffix(')')?.rfind('(')?;
+    let number = &stem[open + 1..stem.len() - 1];
+    if number.is_empty() || number.len() > 3 || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let base = stem[..open].trim_end();
+    (!base.is_empty()).then_some(base)
+}
+
 /// File hosts the launcher knows how to download from; any other site is an
 /// author's own page that links to one of them.
 pub fn is_file_host(url: &Url) -> bool {
@@ -539,6 +551,18 @@ pub(super) async fn trucky_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_browser_copies_give_the_original_name() {
+        assert_eq!(
+            browser_copy_base("Koromyslovo Add-on for Project Russia 1.5(1)"),
+            Some("Koromyslovo Add-on for Project Russia 1.5")
+        );
+        assert_eq!(browser_copy_base("ulmap10 (12)"), Some("ulmap10"));
+        assert_eq!(browser_copy_base("ulmap10"), None);
+        assert_eq!(browser_copy_base("map (beta)"), None);
+        assert_eq!(browser_copy_base("(1)"), None);
+    }
 
     #[test]
     fn an_author_page_resolves_to_its_current_download() {

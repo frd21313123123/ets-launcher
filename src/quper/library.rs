@@ -405,11 +405,26 @@ impl Library {
             {
                 continue;
             }
-            let id = path
+            let mut id = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .context("Нет имени мода")?
                 .to_owned();
+            // A browser saving a file again names it "mod(1).scs"; the build
+            // knows it as "mod", so the copy is stored under its original name.
+            let mut stored = name.to_owned();
+            if !expected.contains(&id.to_lowercase())
+                && let Some(base) = files::browser_copy_base(&id)
+                && expected.contains(&base.to_lowercase())
+            {
+                let base = base.to_owned();
+                stored = match path.extension().and_then(|e| e.to_str()) {
+                    Some(extension) => format!("{base}.{extension}"),
+                    None => base.clone(),
+                };
+                id = base;
+            }
+            let name = stored.as_str();
             let mut magic = [0u8; 4];
             fs::File::open(&path)?
                 .read_exact(&mut magic)
