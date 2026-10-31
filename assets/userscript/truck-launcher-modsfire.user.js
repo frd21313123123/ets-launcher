@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Truck Launcher — загрузка модов
 // @namespace    https://github.com/frd21313123123/ets-launcher
-// @version      3.6.0
+// @version      3.10.0
 // @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, Google Drive, TruckyMods, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверку Cloudflare не трогает — если она попросит, отметьте её сами.
 // @match        https://*/*
 // @grant        window.close
@@ -19,7 +19,7 @@
 
     // The script's state is shown in the tab title, e.g. "[TL 3.0: жду CAPTCHA /
     // Cloudflare]", so the visitor (and the launcher's tests) can see where it is.
-    const VERSION = '3.6';
+    const VERSION = '3.10';
     let shown = null;
     const untitled = () => document.title.replace(/^\[TL [^\]]*\]\s*/, '');
     const status = message => {
@@ -128,10 +128,13 @@
     const finished = () => {
         done = true;
         clearInterval(timer);
-        status('загрузка запущена');
+        status('загрузка запущена, вкладка закроется');
         sessionStorage.removeItem(MARK);
-        // The download continues in the browser; the tab is no longer needed.
-        setTimeout(() => window.close(), 15000);
+        // The download continues in the browser's download manager, and the
+        // launcher opens the next file as soon as it sees the download start.
+        // File servers can take 10 s or more to answer, and closing the tab
+        // before then cancels the request, so the tab stays a while.
+        setTimeout(() => window.close(), 30000);
     };
     // A page whose layout the script does not know: say what is there instead
     // of failing silently.
@@ -143,9 +146,11 @@
             .slice(0, 3)
             .map(e => `${e.tagName.toLowerCase()} "${label(e)}"${e.disabled ? ' disabled' : ''}${visible(e) ? '' : ' hidden'}`);
         status(`не нашёл кнопку загрузки${candidates.length ? ' (' + candidates.join('; ') + ')' : ''}`);
-        // Once per page: save the page's controls to the Downloads folder so a
-        // new layout can be supported. Structure and labels only - no field
-        // values, tokens or cookies.
+        // Once per page, if it stays unknown for half a minute (pages often
+        // pass through a moment with no buttons): save the page's controls to
+        // the Downloads folder so a new layout can be supported. Structure and
+        // labels only - no field values, tokens or cookies.
+        if (readyAt === null || Date.now() - readyAt < 30000) return;
         once('report:' + location.pathname, () => {
             const describe = e => {
                 const style = getComputedStyle(e);
@@ -267,7 +272,11 @@
         const direct = first('a#downloadnow[href], a#download_link[href], a#download-link[href]') ||
             all('a[href]').find(a => visible(a) && /^(start download(?:\s|$)|download\s*\[\s*[\d.,]+\s*[kmgt]?b\s*\])/i.test(label(a)));
         if (direct && https(direct.href) && https(direct.href).href !== location.href) {
-            direct.click();
+            // Go to the file in this tab instead of clicking: a script's click
+            // on a new-tab link is a blocked popup when the page is in the
+            // background, and Sharemods' link does nothing when clicked without
+            // its new tab. The file address itself starts the download.
+            location.assign(direct.href);
             finished();
             return;
         }

@@ -67,15 +67,23 @@ struct Detail {
 /// Files the visitor downloads in the system browser (when a site's security
 /// check does not pass inside the launcher) are taken from the Downloads folder.
 /// Files the launcher cannot download itself, opened one by one in the
-/// visitor's own browser, where Cloudflare's checks pass normally. The next file opens once the previous
-/// one has arrived in the Downloads folder.
+/// visitor's own browser, where Cloudflare's checks pass normally. The next file opens as soon as the
+/// browser starts the previous one; finished files are imported as they arrive.
 struct BrowserQueue {
     pending: VecDeque<(String, String)>,
     current: Option<(String, String)>,
     total: usize,
-    /// Set when a file arrived; the next page opens shortly after.
+    /// Set when a download started or a file arrived; the next page opens shortly after.
     advance_at: Option<Instant>,
+    /// When the current page was opened; it is skipped after [`SKIP_AFTER`].
+    opened_at: Instant,
+    /// Files whose download never started (the host refused or nobody passed its check).
+    skipped: Vec<(String, String)>,
 }
+
+/// A page that has not started a download in this time is skipped, so one host
+/// that refuses a file does not hold up the rest of the build.
+const SKIP_AFTER: Duration = Duration::from_secs(5 * 60);
 
 fn is_modsfire(url: &str) -> bool {
     reqwest::Url::parse(url)
@@ -97,6 +105,8 @@ struct DownloadWatch {
     /// Size last seen and when it last changed; a file is taken once it settles.
     pending: BTreeMap<PathBuf, (u64, Instant)>,
     taken: BTreeSet<PathBuf>,
+    /// Unfinished downloads already seen; a new one means the browser started a file.
+    started: BTreeSet<PathBuf>,
 }
 
 pub struct QuperUi {
@@ -135,6 +145,8 @@ pub struct QuperUi {
     downloads: Option<DownloadWatch>,
     paste: crate::clipboard_files::PasteKey,
     external: Option<BrowserQueue>,
+    /// Files the last browser queue skipped, listed until the next queue starts.
+    browser_skipped: Vec<(String, String)>,
     /// Author pages resolved to the file host behind them.
     resolved: BTreeMap<String, String>,
     resolving: BTreeSet<String>,
@@ -195,6 +207,7 @@ impl QuperUi {
             downloads: None,
             paste: Default::default(),
             external: None,
+            browser_skipped: Vec::new(),
             resolved: BTreeMap::new(),
             resolving: BTreeSet::new(),
             external_downloads: settings.external_downloads,
@@ -320,11 +333,14 @@ impl QuperUi {
         if self.downloads.is_none() {
             return;
         }
+        self.browser_skipped.clear();
         self.external = Some(BrowserQueue {
             total: files.len(),
             pending: files.into(),
             current: None,
             advance_at: None,
+            opened_at: Instant::now(),
+            skipped: Vec::new(),
         });
         self.open_next_external();
     }
@@ -336,11 +352,21 @@ impl QuperUi {
         queue.advance_at = None;
         let Some((url, name)) = queue.pending.pop_front() else {
             queue.current = None;
+            let skipped = std::mem::take(&mut queue.skipped);
             self.external = None;
-            self.inform("Все файлы ModsFire открыты. Последние загрузки подключатся, как только появятся в «Загрузках».");
+            if skipped.is_empty() {
+                self.inform("Все файлы открыты в браузере. Загрузки подключатся к сборке, как только завершатся.");
+            } else {
+                self.fail(format!(
+                    "Не скачались: {}. Откройте их ещё раз или скачайте сами и добавьте через «Импорт файлов…»; можно и создать профиль без них.",
+                    skipped.iter().map(|(_, n)| format!("«{n}»")).collect::<Vec<_>>().join(", ")
+                ));
+            }
+            self.browser_skipped = skipped;
             return;
         };
         queue.current = Some((url.clone(), name));
+        queue.opened_at = Instant::now();
         // A long queue keeps the Downloads folder watched while it runs.
         if let Some(watch) = &mut self.downloads {
             watch.until = Instant::now() + Duration::from_secs(30 * 60);
@@ -349,6 +375,16 @@ impl QuperUi {
             self.external = None;
             self.fail(format!("Не удалось открыть браузер: {e}"));
         }
+    }
+
+    /// Leaves the current page without a download and goes on with the queue.
+    fn skip_external(&mut self) {
+        if let Some(queue) = &mut self.external
+            && let Some(current) = queue.current.take()
+        {
+            queue.skipped.push(current);
+        }
+        self.open_next_external();
     }
 
     fn install_script(&mut self, runtime: &Runtime) {
@@ -486,6 +522,7 @@ impl QuperUi {
             next_scan: now,
             pending: BTreeMap::new(),
             taken: keep.map(|w| w.taken).unwrap_or_default(),
+            started: BTreeSet::new(),
         });
     }
 
@@ -517,12 +554,22 @@ impl QuperUi {
         let mut parts: BTreeMap<String, BTreeMap<u32, PathBuf>> = BTreeMap::new();
         let mut downloading = false;
         let mut unfinished = Vec::new();
+        // The browser began a new mod download: the queue moves on without
+        // waiting for it to finish, and the file is imported when it arrives.
+        let mut began = false;
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if quper::files::unfinished_download(&name) {
                 downloading = true;
                 unfinished.push(name.to_lowercase());
+                let fresh = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|m| m >= watch.since);
+                if fresh && quper::files::unfinished_mod(&name) && watch.started.insert(path) {
+                    began = true;
+                }
                 continue;
             }
             if let Some((base, number)) = quper::files::split_part(&name) {
@@ -559,6 +606,9 @@ impl QuperUi {
                     }
                 }
                 _ => {
+                    // A small file can finish between two scans without a
+                    // visible ".part"; its first sighting counts as a start.
+                    began |= fresh && !watch.pending.contains_key(&path);
                     watch.pending.insert(path, (meta.len(), now));
                 }
             }
@@ -593,7 +643,7 @@ impl QuperUi {
             watch.taken.insert(path.clone());
             self.imports.push(path);
         }
-        if arrived
+        if (arrived || began)
             && let Some(queue) = &mut self.external
             && queue.current.is_some()
             && queue.advance_at.is_none()
@@ -774,7 +824,14 @@ impl QuperUi {
     }
 
     /// Adds the downloaded build to the ordinary game folder as a local profile.
-    fn start_local_profile(&mut self, ctx: &egui::Context, runtime: &Runtime, settings: &Settings) {
+    /// `partial` leaves out the mods that are not downloaded.
+    fn start_local_profile(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &Runtime,
+        settings: &Settings,
+        partial: bool,
+    ) {
         let Some(plan) = self.plan.clone() else {
             return;
         };
@@ -808,8 +865,14 @@ impl QuperUi {
         );
         runtime.spawn_blocking(move || {
             // The game rewrites its profiles on exit, so it must not be running.
-            let result = ets_launcher::install::ensure_game_closed(plan.combo.game)
-                .and_then(|()| library.create_local_profile(&plan, &documents, &transfer, &cancel));
+            let result =
+                ets_launcher::install::ensure_game_closed(plan.combo.game).and_then(|()| {
+                    if partial {
+                        library.create_partial_profile(&plan, &documents, &transfer, &cancel)
+                    } else {
+                        library.create_local_profile(&plan, &documents, &transfer, &cancel)
+                    }
+                });
             if result.is_err() {
                 download::set_state(&transfer, |s| s.status = Status::Error);
             }
@@ -997,8 +1060,24 @@ impl QuperUi {
                             } else {
                                 String::new()
                             };
+                            let skipped = if created.skipped > 0 {
+                                format!(
+                                    " Без {} {} — их можно скачать или импортировать позже и снова нажать «Создать локальный профиль»: карьера сохранится.",
+                                    created.skipped,
+                                    plural(
+                                        created.skipped,
+                                        [
+                                            "недостающего мода",
+                                            "недостающих модов",
+                                            "недостающих модов"
+                                        ]
+                                    )
+                                )
+                            } else {
+                                String::new()
+                            };
                             self.inform(format!(
-                                "Профиль «{}» {}: {}. В игре выберите его в обычном списке профилей — {} модов уже включены в порядке Quper.{copied}",
+                                "Профиль «{}» {}: {}. В игре выберите его в обычном списке профилей — {} модов уже включены в порядке Quper.{skipped}{copied}",
                                 created.name,
                                 if created.updated {
                                     "обновлён, карьера сохранена"
@@ -1093,6 +1172,10 @@ impl QuperUi {
             .is_some_and(|at| Instant::now() >= at)
         {
             self.open_next_external();
+        } else if self.external.as_ref().is_some_and(|q| {
+            q.current.is_some() && q.advance_at.is_none() && q.opened_at.elapsed() >= SKIP_AFTER
+        }) {
+            self.skip_external();
         }
         if self.external.is_some() || self.downloads.is_some() {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -1949,7 +2032,22 @@ impl QuperUi {
                                     .on_hover_text("Профиль появится в обычном списке профилей игры, моды включены в порядке Quper")
                                     .clicked()
                                 {
-                                    self.start_local_profile(ctx, runtime, settings);
+                                    self.start_local_profile(ctx, runtime, settings, false);
+                                }
+                                // Files no source would give: the build can still
+                                // be played with the mods that did arrive.
+                                let lacking = state.as_ref().map_or(0, |(missing, _)| missing.len());
+                                if !complete
+                                    && done > 0
+                                    && lacking > 0
+                                    && Button::new(&format!("Профиль без недостающих ({lacking})"), Kind::Ghost)
+                                        .icon(Icon::Layers)
+                                        .enabled(can_act)
+                                        .show(ui, p)
+                                        .on_hover_text("Локальный профиль из уже скачанных модов в порядке Quper. Недостающие можно добавить позже: импортируйте их и создайте профиль снова — карьера сохранится.")
+                                        .clicked()
+                                {
+                                    self.start_local_profile(ctx, runtime, settings, true);
                                 }
                                 if let Some(dir) = self.local_profile.clone()
                                     && Button::new("Папка локального профиля", Kind::Ghost)
@@ -2328,10 +2426,11 @@ impl QuperUi {
                     q.total - q.pending.len(),
                     q.total,
                     q.advance_at.is_some(),
+                    SKIP_AFTER.saturating_sub(q.opened_at.elapsed()),
                 )
             });
             match running {
-                Some((current, opened, total, arrived)) => {
+                Some((current, opened, total, arrived, left)) => {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(16.0).color(p.accent));
                         ui.label(ui::text(
@@ -2345,10 +2444,11 @@ impl QuperUi {
                     ui.add(
                         egui::Label::new(ui::text(
                             if arrived {
-                                format!("Файл «{name}» получен, открываем следующий…")
+                                format!("Загрузка «{name}» началась, открываем следующий файл…")
                             } else {
                                 format!(
-                                    "В браузере открыт «{name}». Скрипт нажмёт кнопки сайта; если Cloudflare попросит, отметьте «Я человек». Как только файл появится в «Загрузках», лаунчер подключит его и откроет следующий."
+                                    "В браузере открыт «{name}». Скрипт нажмёт кнопки сайта; если Cloudflare попросит, отметьте «Я человек». Как только загрузка начнётся, вкладка закроется и откроется следующий файл; скачанные файлы подключатся к сборке сами. Если загрузка не начнётся за {} мин, файл будет пропущен.",
+                                    left.as_secs().div_ceil(60).max(1)
                                 )
                             },
                             13.0,
@@ -2370,13 +2470,14 @@ impl QuperUi {
                         {
                             self.fail(format!("Не удалось открыть браузер: {e}"));
                         }
-                        if Button::new("Следующий файл", Kind::Ghost)
+                        if Button::new("Пропустить файл", Kind::Ghost)
                             .height(40.0)
                             .size(13.0)
                             .show(ui, p)
+                            .on_hover_text("Файл попадёт в список нескачанных; его можно будет открыть ещё раз или импортировать")
                             .clicked()
                         {
-                            self.open_next_external();
+                            self.skip_external();
                         }
                         if Button::new("Остановить", Kind::Danger)
                             .icon(Icon::Stop)
@@ -2402,13 +2503,64 @@ impl QuperUi {
                     ));
                     ui.add(
                         egui::Label::new(ui::text(
-                            "Эти файлы лаунчер не может скачать сам: ModsFire и сайты с проверкой Cloudflare, а также всё, что не скачалось при «Продолжить загрузку». Лаунчер откроет их по одному в вашем браузере, скрипт для Tampermonkey нажмёт кнопки сайта, а скачанные файлы подключатся к сборке сами. Браузер, папка загрузок и подготовка Tampermonkey — в «Настройки → Загрузка через браузер».",
+                            "Эти файлы лаунчер не может скачать сам: ModsFire и сайты с проверкой Cloudflare, а также всё, что не скачалось при «Продолжить загрузку». Лаунчер откроет их по одному в вашем браузере: скрипт для Tampermonkey нажмёт кнопки сайта, после начала загрузки закроет вкладку, и откроется следующий файл. Скачанные файлы подключатся к сборке сами. Браузер, папка загрузок и подготовка Tampermonkey — в «Настройки → Загрузка через браузер».",
                             13.0,
                             W::Regular,
                             p.muted,
                         ))
                         .wrap(),
                     );
+                    // What the last queue could not get and the build still lacks.
+                    let skipped = self
+                        .browser_skipped
+                        .iter()
+                        .filter(|(url, _)| files.iter().any(|(u, _)| u == url))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !skipped.is_empty() {
+                        ui::inset(p)
+                            .inner_margin(Margin::symmetric(16, 12))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 8.0;
+                                ui.label(ui::text(
+                                    format!("Не скачались: {}", skipped.len()),
+                                    14.0,
+                                    W::Bold,
+                                    p.warn,
+                                ));
+                                ui.add(
+                                    egui::Label::new(ui::text(
+                                        "Сайт не начал загрузку за 5 минут или отказал в файле. Откройте страницу ещё раз и скачайте файл сами — он подключится из «Загрузок», либо добавьте его через «Импорт файлов…». Можно и создать профиль без них.",
+                                        12.0,
+                                        W::Regular,
+                                        p.muted,
+                                    ))
+                                    .wrap(),
+                                );
+                                for (url, name) in &skipped {
+                                    ui.horizontal(|ui| {
+                                        if Button::new("Открыть", Kind::Ghost)
+                                            .icon(Icon::External)
+                                            .height(30.0)
+                                            .size(12.0)
+                                            .show(ui, p)
+                                            .clicked()
+                                        {
+                                            // Untagged: the visitor downloads it by hand.
+                                            self.watch_downloads();
+                                            if let Err(e) = open_in_browser(url) {
+                                                self.fail(format!("Не удалось открыть браузер: {e}"));
+                                            }
+                                        }
+                                        ui.add(
+                                            egui::Label::new(ui::text(name, 13.0, W::Semi, p.text))
+                                                .truncate(),
+                                        );
+                                    });
+                                }
+                            });
+                    }
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                         if Button::new("Скачать через браузер", Kind::Primary)
@@ -2457,7 +2609,7 @@ impl QuperUi {
                         }
                         ui.add(
                             egui::Label::new(ui::text(
-                                "Скрипт работает только во вкладках, которые открыл лаунчер, и нажимает лишь бесплатные кнопки ModsFire. Проверку Cloudflare он не трогает. Без скрипта очередь тоже работает — кнопки на сайте нужно будет нажать самому.",
+                                "Скрипт работает только во вкладках, которые открыл лаунчер, и нажимает лишь бесплатные кнопки файлообменников. Проверку Cloudflare он не трогает. Без скрипта очередь тоже работает — кнопки на сайте нужно будет нажать самому.",
                                 12.0,
                                 W::Regular,
                                 p.muted,

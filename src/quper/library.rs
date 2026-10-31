@@ -647,6 +647,8 @@ pub struct LocalProfile {
     pub copied: u64,
     /// The profile already existed: its career was kept, only the mod list changed.
     pub updated: bool,
+    /// Mods of the build left out because they are not downloaded.
+    pub skipped: usize,
 }
 
 impl Library {
@@ -661,12 +663,47 @@ impl Library {
         transfer: &SharedTransfer,
         cancel: &CancellationToken,
     ) -> Result<LocalProfile> {
+        self.local_profile(plan, documents, transfer, cancel, false)
+    }
+
+    /// Like [`Library::create_local_profile`], for a build some of whose files
+    /// could not be downloaded: the profile lists only the mods that are ready,
+    /// still in the author's order. Importing the rest later and creating the
+    /// profile again adds them while keeping the career.
+    pub fn create_partial_profile(
+        &self,
+        plan: &Plan,
+        documents: &Path,
+        transfer: &SharedTransfer,
+        cancel: &CancellationToken,
+    ) -> Result<LocalProfile> {
+        self.local_profile(plan, documents, transfer, cancel, true)
+    }
+
+    fn local_profile(
+        &self,
+        plan: &Plan,
+        documents: &Path,
+        transfer: &SharedTransfer,
+        cancel: &CancellationToken,
+        skip_missing: bool,
+    ) -> Result<LocalProfile> {
         plan.validate()?;
         let release = self.release(&plan.combo)?;
         let _lock = self.lock(&release)?;
+        let missing = self.missing(plan)?;
         ensure!(
-            self.missing(plan)?.is_empty(),
+            skip_missing || missing.is_empty(),
             "Сначала скачайте все файлы сборки"
+        );
+        let order = plan
+            .order
+            .iter()
+            .filter(|id| !missing.contains(*id))
+            .collect::<Vec<_>>();
+        ensure!(
+            !order.is_empty(),
+            "В сборке ещё нет ни одного скачанного мода"
         );
         let state = self.state(&plan.combo)?;
         let game = plan.combo.game;
@@ -674,10 +711,10 @@ impl Library {
         let mods = docs.join("mod");
         fs::create_dir_all(&mods)?;
         archive::ordinary_metadata(&mods)?;
-        let total = plan.order.len();
+        let total = order.len();
         let mut names = Vec::with_capacity(total);
         let mut copied = 0;
-        for (index, id) in plan.order.iter().enumerate() {
+        for (index, id) in order.into_iter().enumerate() {
             check(cancel)?;
             let package = &state.packages[&id.to_lowercase()];
             download::set_state(transfer, |s| {
@@ -733,6 +770,7 @@ impl Library {
             name,
             profile: dir,
             mods: names.len(),
+            skipped: missing.len(),
             copied,
             updated,
         })

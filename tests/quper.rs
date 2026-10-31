@@ -469,6 +469,56 @@ async fn local_profile_needs_the_whole_build() {
 }
 
 #[tokio::test]
+async fn partial_profile_lists_only_the_downloaded_mods() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let documents = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let plan = plan();
+    let cancel = CancellationToken::new();
+    // Nothing downloaded yet: there is no profile to make.
+    assert!(
+        library
+            .create_partial_profile(&plan, documents.path(), &transfer(), &cancel)
+            .is_err()
+    );
+    library
+        .import(
+            &plan,
+            &[scs(inputs.path(), "base.scs", 1)],
+            &transfer(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let created = library
+        .create_partial_profile(&plan, documents.path(), &transfer(), &cancel)
+        .unwrap();
+    assert_eq!((created.mods, created.skipped), (1, 1));
+    let profile = fs::read_to_string(created.profile.join("profile.sii")).unwrap();
+    assert!(profile.contains("active_mods: 1"));
+    assert!(profile.contains("active_mods[0]: \"base|base\""));
+
+    // The missing mod imported later joins the same profile, in order.
+    library
+        .import(
+            &plan,
+            &[scs(inputs.path(), "addon.scs", 2)],
+            &transfer(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let full = library
+        .create_local_profile(&plan, documents.path(), &transfer(), &cancel)
+        .unwrap();
+    assert!(full.updated);
+    assert_eq!((full.mods, full.skipped), (2, 0));
+    let profile = fs::read_to_string(full.profile.join("profile.sii")).unwrap();
+    assert!(profile.contains("active_mods: 2"));
+}
+
+#[tokio::test]
 async fn ats_local_profile_uses_the_ats_folder_and_module() {
     let root = tempfile::tempdir().unwrap();
     let inputs = tempfile::tempdir().unwrap();

@@ -130,6 +130,20 @@ pub fn unfinished_download(name: &str) -> bool {
     .any(|suffix| lower.ends_with(suffix))
 }
 
+/// An unfinished download that will become a mod or archive: Firefox's
+/// "mod.Ab12.scs.part", Chrome's "mod.zip.crdownload" or its nameless
+/// "Unconfirmed 123.crdownload". Videos and other downloads give `false`.
+pub fn unfinished_mod(name: &str) -> bool {
+    if !unfinished_download(name) {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    let Some((target, _)) = lower.rsplit_once('.') else {
+        return false;
+    };
+    allowed_filename(target) || target.starts_with("unconfirmed ")
+}
+
 /// The original name of a file a browser saved again under a numbered name:
 /// "mod(1)" or "mod (2)" gives "mod". Other names give `None`.
 pub fn browser_copy_base(stem: &str) -> Option<&str> {
@@ -602,6 +616,11 @@ mod tests {
         assert!(unfinished_download("promods.zip.001.crdownload"));
         assert!(unfinished_download("promods.zip.002.part"));
         assert!(!unfinished_download("map.part2.rar"));
+        assert!(unfinished_mod("BXPrcRussiaPoland161.Xy9z.scs.part"));
+        assert!(unfinished_mod("promods.zip.002.part"));
+        assert!(unfinished_mod("Unconfirmed 812345.crdownload"));
+        assert!(!unfinished_mod("video.mp4.part"));
+        assert!(!unfinished_mod("map.part2.rar"));
     }
 
     #[test]
