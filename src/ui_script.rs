@@ -1,7 +1,7 @@
 //! Debug-only UI automation for checking the interface without touching the desktop.
 //!
 //! `ETS_LAUNCHER_UI_SCRIPT=<file>` replays one command per line into the window:
-//! `click X Y`, `move X Y`, `scroll DY`, `type TEXT`, `backspace N`, `wait MS`, `shot FILE.png`, `exit`.
+//! `click X Y`, `move X Y`, `scroll DY`, `type TEXT`, `backspace N`, `drop FILE`, `wait MS`, `shot FILE.png`, `exit`.
 //! Coordinates are egui points; screenshots are saved from the window's own frame.
 
 use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2, RawInput, pos2, vec2};
@@ -17,6 +17,7 @@ enum Step {
     Scroll(f32),
     Type(String),
     Backspace(usize),
+    Drop(PathBuf),
     Wait(Duration),
     Shot(PathBuf),
     Exit,
@@ -47,6 +48,7 @@ impl Script {
                     "scroll" => Step::Scroll(number(args.next())),
                     "type" => Step::Type(rest.to_owned()),
                     "backspace" => Step::Backspace(number(args.next()) as usize),
+                    "drop" => Step::Drop(PathBuf::from(rest)),
                     "wait" => Step::Wait(Duration::from_millis(number(args.next()) as u64)),
                     "shot" => Step::Shot(PathBuf::from(rest)),
                     "exit" => Step::Exit,
@@ -114,6 +116,10 @@ impl Script {
                 modifiers: Modifiers::NONE,
             }),
             Step::Type(text) => raw.events.push(Event::Text(text)),
+            Step::Drop(path) => raw.dropped_files.push(egui::DroppedFile {
+                path: Some(path),
+                ..Default::default()
+            }),
             Step::Backspace(count) => {
                 for pressed in std::iter::repeat_n([true, false], count).flatten() {
                     raw.events.push(Event::Key {

@@ -108,6 +108,7 @@ pub struct QuperUi {
     browser_request: Option<(String, String)>,
     imports: Vec<PathBuf>,
     downloads: Option<DownloadWatch>,
+    paste: crate::clipboard_files::PasteKey,
     /// Download size per build, `None` while unknown; read from cache on demand.
     sizes: BTreeMap<String, Option<Estimate>>,
     /// Build whose size is being estimated: (id, finished sources, all sources).
@@ -161,6 +162,7 @@ impl QuperUi {
             browser_request: None,
             imports: Vec::new(),
             downloads: None,
+            paste: Default::default(),
             sizes: BTreeMap::new(),
             sizing: None,
             size_failed: BTreeSet::new(),
@@ -207,6 +209,103 @@ impl QuperUi {
         self.browser_current = None;
         self.imports.clear();
         self.downloads = None;
+    }
+
+    /// Archives and packages the import accepts, for file dialogs.
+    const IMPORT_EXTENSIONS: [&str; 7] = ["scs", "zip", "rar", "7z", "001", "002", "003"];
+
+    /// Files the visitor already has (dropped, pasted or picked) go straight to
+    /// the import queue of the open build instead of being downloaded.
+    fn import_files(&mut self, files: Vec<PathBuf>) {
+        if self.plan.is_none() {
+            self.fail("Сначала откройте сборку, в которую нужно добавить файлы.");
+            return;
+        }
+        let (accepted, rejected): (Vec<_>, Vec<_>) = files.into_iter().partition(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(quper::files::allowed_filename)
+        });
+        if accepted.is_empty() {
+            self.fail(
+                "Подходят только моды и архивы: .scs, .zip, .rar, .7z или части архива .001, .002…",
+            );
+            return;
+        }
+        let names = accepted
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.inform(format!(
+            "Добавляем в сборку: {names}{}. Файл будет проверен и подключён автоматически.",
+            if rejected.is_empty() {
+                String::new()
+            } else {
+                format!(" (пропущено неподходящих: {})", rejected.len())
+            }
+        ));
+        for path in accepted {
+            if !self.imports.contains(&path) {
+                self.imports.push(path);
+            }
+        }
+    }
+
+    /// Dropped or pasted files while a build is open.
+    fn take_dropped_and_pasted(&mut self, ctx: &egui::Context, p: &Palette) {
+        let (dropped, hovering, focused) = ctx.input(|i| {
+            (
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect::<Vec<_>>(),
+                !i.raw.hovered_files.is_empty(),
+                i.focused,
+            )
+        });
+        if !dropped.is_empty() {
+            self.import_files(dropped);
+        }
+        // A text field keeps its own Ctrl+V.
+        if self.paste.pressed() && focused && !ctx.wants_keyboard_input() {
+            let files = crate::clipboard_files::files();
+            if !files.is_empty() {
+                self.import_files(files);
+            }
+        }
+        if hovering {
+            let screen = ctx.content_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("quper-drop"),
+            ));
+            painter.rect_filled(screen, 0, p.bg.gamma_multiply(0.85));
+            let target = screen.shrink(32.0);
+            painter.rect_stroke(
+                target,
+                16,
+                Stroke::new(2.0_f32, p.accent),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                target.center() - vec2(0.0, 14.0),
+                egui::Align2::CENTER_CENTER,
+                "Отпустите, чтобы добавить файлы в сборку",
+                ui::font(22.0, W::Extra),
+                p.text,
+            );
+            painter.text(
+                target.center() + vec2(0.0, 18.0),
+                egui::Align2::CENTER_CENTER,
+                "Лаунчер сам определит, каким модам они соответствуют",
+                ui::font(14.0, W::Regular),
+                p.muted,
+            );
+        }
     }
 
     /// Opens the current page in the system browser and starts taking the
@@ -891,6 +990,9 @@ impl QuperUi {
                 }
             }
         }
+        if self.selected.is_some() {
+            self.take_dropped_and_pasted(ctx, p);
+        }
         if self.browser.visible {
             self.browser_view(ui, p);
             return false;
@@ -945,6 +1047,19 @@ impl QuperUi {
                 {
                     self.next_browser();
                 }
+                if Button::new("Импортировать файл…", Kind::Ghost)
+                    .height(40.0)
+                    .size(13.0)
+                    .show(ui, p)
+                    .on_hover_text("Файл уже скачан? Выберите его, перетащите в окно или вставьте через Ctrl+V")
+                    .clicked()
+                    && let Some(files) = rfd::FileDialog::new()
+                        .set_title(format!("Файл для «{}»", self.browser.title))
+                        .add_filter("Моды и архивы", &Self::IMPORT_EXTENSIONS)
+                        .pick_files()
+                {
+                    self.import_files(files);
+                }
                 if self.job {
                     ui.label(ui::text(
                         "Проверка и подключение скачанного файла…",
@@ -961,7 +1076,7 @@ impl QuperUi {
             let message = if since.elapsed() < Duration::from_secs(20) {
                 "Сайт проверяет браузер через Cloudflare. Если на странице появилась галочка «Я человек», отметьте её — дальше лаунчер продолжит сам."
             } else {
-                "Проверка Cloudflare не проходит во встроенном браузере? Откройте страницу в обычном браузере и скачайте файл там — лаунчер сам заберёт его из папки «Загрузки» и добавит в сборку."
+                "Проверка Cloudflare не проходит во встроенном браузере? Откройте страницу в обычном браузере и скачайте файл там — лаунчер сам заберёт его из папки «Загрузки». Или перетащите уже скачанный файл в окно лаунчера."
             };
             if ui::banner(ui, p, Tone::Warn, message, Some("Открыть в браузере")) {
                 self.open_external();
@@ -1552,10 +1667,7 @@ impl QuperUi {
                                     .show(ui, p)
                                     .clicked()
                                     && let Some(inputs) = rfd::FileDialog::new()
-                                        .add_filter(
-                                            "Моды и архивы",
-                                            &["scs", "zip", "rar", "7z", "001", "002", "003"],
-                                        )
+                                        .add_filter("Моды и архивы", &Self::IMPORT_EXTENSIONS)
                                         .pick_files()
                                 {
                                     self.start_job(ctx, runtime, settings, Some(inputs));
@@ -1789,6 +1901,16 @@ impl QuperUi {
                                 }
                             });
                         });
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::Label::new(ui::text(
+                                "Файл не скачивается? Перетащите его в окно, вставьте через Ctrl+V (скопировав в Проводнике) или нажмите «Импорт…» в строке мода.",
+                                12.0,
+                                W::Regular,
+                                p.muted,
+                            ))
+                            .wrap(),
+                        );
                     });
                 ui.painter().hline(
                     header.response.rect.x_range(),
@@ -1812,10 +1934,22 @@ impl QuperUi {
                         });
                 }
                 for (row, state) in visible {
-                    if self.file_row(ui, p, row, *state, idle)
-                        && let Some(url) = row.urls.first()
-                    {
-                        self.browser_request = Some((url.clone(), row.name.clone()));
+                    match self.file_row(ui, p, row, *state, idle) {
+                        RowAction::Open => {
+                            if let Some(url) = row.urls.first() {
+                                self.browser_request = Some((url.clone(), row.name.clone()));
+                            }
+                        }
+                        RowAction::Import => {
+                            if let Some(files) = rfd::FileDialog::new()
+                                .set_title(format!("Файл для «{}»", row.name))
+                                .add_filter("Моды и архивы", &Self::IMPORT_EXTENSIONS)
+                                .pick_files()
+                            {
+                                self.import_files(files);
+                            }
+                        }
+                        RowAction::None => {}
                     }
                 }
             });
@@ -1976,7 +2110,7 @@ impl QuperUi {
         row: &FileRow,
         state: FileFilter,
         idle: bool,
-    ) -> bool {
+    ) -> RowAction {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
         ui.painter().hline(
             rect.x_range(),
@@ -1992,7 +2126,7 @@ impl QuperUi {
             ui::mono(12.0, false),
             p.muted,
         );
-        let status_width = 220.0;
+        let status_width = 300.0;
         let host_width = if inner.width() > 560.0 { 120.0 } else { 0.0 };
         let name_rect = Rect::from_min_max(
             pos2(inner.min.x + 56.0, rect.min.y),
@@ -2031,42 +2165,74 @@ impl QuperUi {
             egui::UiBuilder::new()
                 .max_rect(status)
                 .layout(Layout::right_to_left(Align::Center)),
-            |ui| match state {
-                FileFilter::Ready => {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(ui::text("Готов", 13.0, W::Bold, p.ok));
-                    ui::icon(ui, Icon::Check, 14.0, p.ok, 3.0);
-                    false
-                }
-                FileFilter::Pending => Button::new("Открыть источник", Kind::Ghost)
-                    .trailing(Icon::External)
-                    .height(36.0)
-                    .size(13.0)
-                    .pad(12.0)
-                    .radius(8)
-                    .enabled(idle)
-                    .show(ui, p)
-                    .clicked(),
-                _ => {
-                    ui::chip(
-                        ui,
-                        if row.excluded_boosty {
-                            "Boosty исключён · нужен импорт"
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let import = |ui: &mut egui::Ui, kind: Kind, label: &str| {
+                    Button::new(label, kind)
+                        .height(36.0)
+                        .size(13.0)
+                        .pad(12.0)
+                        .radius(8)
+                        .enabled(idle)
+                        .show(ui, p)
+                };
+                match state {
+                    FileFilter::Ready => {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(ui::text("Готов", 13.0, W::Bold, p.ok));
+                        ui::icon(ui, Icon::Check, 14.0, p.ok, 3.0);
+                        RowAction::None
+                    }
+                    FileFilter::Pending => {
+                        let open = Button::new("Открыть источник", Kind::Ghost)
+                            .trailing(Icon::External)
+                            .height(36.0)
+                            .size(13.0)
+                            .pad(12.0)
+                            .radius(8)
+                            .enabled(idle)
+                            .show(ui, p)
+                            .clicked();
+                        let picked = import(ui, Kind::Ghost, "Импорт…")
+                            .on_hover_text(
+                                "Уже есть этот файл? Выберите его — скачивать не придётся",
+                            )
+                            .clicked();
+                        if open {
+                            RowAction::Open
+                        } else if picked {
+                            RowAction::Import
                         } else {
-                            "Нет публичной ссылки"
-                        },
-                        false,
-                        p.warn,
-                        p.warn_chip,
-                        28.0,
-                        12.0,
-                    );
-                    false
+                            RowAction::None
+                        }
+                    }
+                    _ => {
+                        let reason = if row.excluded_boosty {
+                            "Ссылка ведёт на Boosty — скачайте файл у автора и выберите его здесь"
+                        } else {
+                            "Нет публичной ссылки — выберите уже скачанный файл"
+                        };
+                        if import(ui, Kind::Warn, "Импортировать файл…")
+                            .on_hover_text(reason)
+                            .clicked()
+                        {
+                            RowAction::Import
+                        } else {
+                            RowAction::None
+                        }
+                    }
                 }
             },
         )
         .inner
     }
+}
+
+/// What a file row asked for.
+enum RowAction {
+    None,
+    Open,
+    Import,
 }
 
 fn file_state(row: &FileRow, missing: &[String]) -> FileFilter {

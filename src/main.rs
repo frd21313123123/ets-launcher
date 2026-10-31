@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod browser_smoke;
+mod clipboard_files;
 mod mod_browser;
 mod quper_ui;
 mod ui;
