@@ -433,7 +433,10 @@ impl Library {
                 s.status = Status::Extracting;
                 s.name = name.into();
             });
-            let entries = if ext == "scs" && &magic == b"SCS#" {
+            // A .scs is a game package whatever its container: SCS# (HashFS),
+            // a protected format such as Project Russia's "AEM!", or a ZIP.
+            // Only a ZIP one can be checked by the archiver.
+            let entries = if ext == "scs" && &magic != b"PK\x03\x04" {
                 None
             } else {
                 Some(archive::inspect(&path, cancel).await?)

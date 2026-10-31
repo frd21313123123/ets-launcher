@@ -527,3 +527,21 @@ async fn a_numbered_browser_copy_counts_as_the_mod_it_was_saved_from() {
     assert_eq!(state.packages["addon"].filename, "addon.scs");
     assert!(!state.packages.contains_key("addon(1)"));
 }
+
+#[tokio::test]
+async fn a_protected_scs_package_is_used_as_it_is() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let plan = plan();
+    // Project Russia ships its package in its own "AEM!" container.
+    let path = inputs.path().join("base.scs");
+    let mut bytes = b"AEM!".to_vec();
+    bytes.extend([0u8; 64]);
+    fs::write(&path, bytes).unwrap();
+    let report = library
+        .import(&plan, &[path], &transfer(), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(report.missing, ["addon"]);
+}

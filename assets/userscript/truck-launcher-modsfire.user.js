@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Truck Launcher — загрузка модов
 // @namespace    https://github.com/frd21313123123/ets-launcher
-// @version      2.0.0
-// @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, Google Drive, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверку Cloudflare не трогает — если она попросит, отметьте её сами.
+// @version      2.1.0
+// @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, Google Drive, TruckyMods, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверку Cloudflare не трогает — если она попросит, отметьте её сами.
 // @match        https://*/*
 // @grant        window.close
 // @run-at       document-idle
@@ -64,16 +64,36 @@
             return;
         }
 
-        // An author's own page: follow its first "Download" link to a file host,
-        // carrying the mark to that site.
+        // An author's own page: follow its first "Download" link. A link to a
+        // file host gets the mark carried along; a link straight to a mod file
+        // (.scs, .zip, .rar, .7z) is simply downloaded.
         if (!fileHosts.test(host)) {
-            const link = [...document.querySelectorAll('a[href]')].find(a => /^\s*(download|скачать)\b/i.test(text(a)) && https(a.href) && fileHosts.test(https(a.href).hostname));
+            const fileLink = url => /\.(scs|zip|rar|7z|\d{3})$/i.test(url.pathname);
+            const link = [...document.querySelectorAll('a[href]')].find(a => {
+                const url = https(a.href);
+                const labelled = /^\s*(download|скачать|pobierz)\b/i.test(text(a)) || /download/i.test(a.className);
+                return url && labelled && (fileHosts.test(url.hostname) || fileLink(url));
+            });
             if (link) {
                 done = true;
                 const url = https(link.href);
-                url.hash = MARK;
-                location.assign(url.href);
+                if (fileLink(url) && !fileHosts.test(url.hostname)) {
+                    clearInterval(timer);
+                    link.removeAttribute('target');
+                    link.click();
+                    finished();
+                } else {
+                    url.hash = MARK;
+                    location.assign(url.href);
+                }
             }
+            return;
+        }
+
+        if (host === 'truckymods.io' || host === 'beta.truckymods.io') {
+            // Some mods need a signed-in account; the visitor's browser has it.
+            const button = [...document.querySelectorAll('downloadbutton button, downloadbutton a, button, a.btn')].find(b => visible(b) && /^download\b/i.test(text(b)) && !/premium|client|install/i.test(text(b)));
+            if (button && once('trucky', () => button.click())) finished();
             return;
         }
 
