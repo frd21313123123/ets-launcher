@@ -320,6 +320,27 @@ async fn save_response(
     Ok(target)
 }
 
+/// The direct download address of a Google Drive file page.
+pub fn google_download(page: &Url) -> Result<Url> {
+    let id = page
+        .path_segments()
+        .and_then(|s| {
+            let p = s.collect::<Vec<_>>();
+            (p.len() >= 3 && p[0] == "file" && p[1] == "d").then(|| p[2].to_owned())
+        })
+        .or_else(|| {
+            page.query_pairs()
+                .find(|(k, _)| k == "id")
+                .map(|(_, v)| v.into_owned())
+        })
+        .context("Нет ID файла Google Drive")?;
+    let mut url = Url::parse("https://drive.usercontent.google.com/download")?;
+    url.query_pairs_mut()
+        .append_pair("id", &id)
+        .append_pair("export", "download");
+    Ok(url)
+}
+
 pub async fn download_source(
     url: &str,
     output: &Path,
@@ -329,24 +350,7 @@ pub async fn download_source(
     let client = source::client()?;
     let mut first = public_url(url)?;
     if first.host_str() == Some("drive.google.com") {
-        let id = first
-            .path_segments()
-            .and_then(|s| {
-                let p = s.collect::<Vec<_>>();
-                (p.len() >= 3 && p[0] == "file" && p[1] == "d").then(|| p[2].to_owned())
-            })
-            .or_else(|| {
-                first
-                    .query_pairs()
-                    .find(|(k, _)| k == "id")
-                    .map(|(_, v)| v.into_owned())
-            })
-            .context("Нет ID файла Google Drive")?;
-        first = Url::parse("https://drive.usercontent.google.com/download")?;
-        first
-            .query_pairs_mut()
-            .append_pair("id", &id)
-            .append_pair("export", "download");
+        first = google_download(&first)?;
     }
     let mut queue = vec![(
         first.to_string(),
@@ -457,6 +461,19 @@ async fn trucky_file(
     cookies: &str,
     cancel: &CancellationToken,
 ) -> Result<(String, String)> {
+    let file = trucky_link(client, base, html, cookies, cancel).await?;
+    tokio::select! { _ = cancel.cancelled() => bail!("Загрузка остановлена"), _ = tokio::time::sleep(Duration::from_secs(10)) => {} }
+    Ok(file)
+}
+
+/// The file address and name TruckyMods' own download button requests.
+pub(super) async fn trucky_link(
+    client: &Client,
+    base: &Url,
+    html: &str,
+    cookies: &str,
+    cancel: &CancellationToken,
+) -> Result<(String, String)> {
     let (project, build, csrf) = crate::maps::access::trucky_request(html)?;
     let mut request = client
         .post(base.join("/projects/createDownloadUrl")?)
@@ -486,7 +503,6 @@ async fn trucky_file(
         .context("Нет имени файла TruckyMods")?
         .to_owned();
     ensure!(allowed_filename(&name), "Некорректный файл TruckyMods");
-    tokio::select! { _ = cancel.cancelled() => bail!("Загрузка остановлена"), _ = tokio::time::sleep(Duration::from_secs(10)) => {} }
     Ok((url, name))
 }
 

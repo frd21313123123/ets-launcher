@@ -2,6 +2,7 @@
 //! come from the author's site; no JavaScript from the site is executed.
 pub mod files;
 pub mod library;
+pub mod size;
 pub mod source;
 
 use crate::game::Game;

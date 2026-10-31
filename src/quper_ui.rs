@@ -12,14 +12,19 @@ use ets_launcher::{
     maps,
     quper::{
         self, Catalog, Combo, FileRow, Plan,
-        library::{Library, Report},
+        library::{Library, LocalProfile, Report},
+        size::Estimate,
     },
     settings::Settings,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use tokio::runtime::Runtime;
@@ -30,6 +35,8 @@ enum Event {
     Plan(String, Result<Plan, String>),
     Image(String, Result<egui::ColorImage, String>),
     Job(Result<Report, String>),
+    Size(String, Result<Estimate, String>),
+    Profile(Result<LocalProfile, String>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -88,6 +95,15 @@ pub struct QuperUi {
     browser_current: Option<String>,
     browser_request: Option<(String, String)>,
     imports: Vec<PathBuf>,
+    /// Download size per build, `None` while unknown; read from cache on demand.
+    sizes: BTreeMap<String, Option<Estimate>>,
+    /// Build whose size is being estimated: (id, finished sources, all sources).
+    sizing: Option<(String, Arc<AtomicUsize>, usize)>,
+    /// Builds whose estimate failed in this session; not retried automatically.
+    size_failed: BTreeSet<String>,
+    job_title: &'static str,
+    /// Folder of the local profile created in this session.
+    local_profile: Option<PathBuf>,
 }
 
 impl QuperUi {
@@ -131,6 +147,11 @@ impl QuperUi {
             browser_current: None,
             browser_request: None,
             imports: Vec::new(),
+            sizes: BTreeMap::new(),
+            sizing: None,
+            size_failed: BTreeSet::new(),
+            job_title: "Загрузка сборки",
+            local_profile: None,
         };
         ui.ensure_version(settings.selected_game);
         ui
@@ -295,6 +316,100 @@ impl QuperUi {
         });
     }
 
+    /// Size of a build from memory or the cache of an earlier estimate.
+    fn cached_size(&mut self, combo: &Combo) -> Option<Estimate> {
+        if let Some(value) = self.sizes.get(&combo.id) {
+            return value.clone();
+        }
+        let value = maps::config_path(&format!("quper-size-{}.json", combo.id))
+            .ok()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice::<Estimate>(&b).ok())
+            .filter(|e| e.matches(&combo.version, &combo.date));
+        self.sizes.insert(combo.id.clone(), value.clone());
+        value
+    }
+
+    /// Estimates the size of the opened build once, without the user asking.
+    fn ensure_size(&mut self, ctx: &egui::Context, runtime: &Runtime) {
+        let Some(plan) = self.plan.clone() else {
+            return;
+        };
+        let id = plan.combo.id.clone();
+        if self.sizing.is_some()
+            || self.size_failed.contains(&id)
+            || self.cached_size(&plan.combo).is_some()
+        {
+            return;
+        }
+        let sources = plan
+            .files
+            .iter()
+            .filter(|r| r.required)
+            .filter_map(|r| r.urls.first())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let done = Arc::new(AtomicUsize::new(0));
+        self.sizing = Some((id.clone(), done.clone(), sources));
+        let (sender, cancel, ctx) = (
+            self.sender.clone(),
+            self.metadata_cancel.clone(),
+            ctx.clone(),
+        );
+        runtime.spawn(async move {
+            let result = quper::size::estimate(&plan, done, &cancel)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            let _ = sender.send(Event::Size(id, result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Adds the downloaded build to the ordinary game folder as a local profile.
+    fn start_local_profile(&mut self, ctx: &egui::Context, runtime: &Runtime, settings: &Settings) {
+        let Some(plan) = self.plan.clone() else {
+            return;
+        };
+        let library = match Self::library(settings) {
+            Ok(l) => l,
+            Err(e) => {
+                self.fail(format!("{e:#}"));
+                return;
+            }
+        };
+        let Some(documents) = documents_dir() else {
+            self.fail("Не найдена папка «Документы» Windows");
+            return;
+        };
+        self.job = true;
+        self.job_title = "Создание локального профиля";
+        self.cancel = CancellationToken::new();
+        self.note = None;
+        download::set_state(&self.transfer, |s| {
+            *s = Transfer {
+                status: Status::Connecting,
+                message: "Проверяем, что игра закрыта…".into(),
+                ..Default::default()
+            }
+        });
+        let (sender, cancel, ctx, transfer) = (
+            self.sender.clone(),
+            self.cancel.clone(),
+            ctx.clone(),
+            self.transfer.clone(),
+        );
+        runtime.spawn_blocking(move || {
+            // The game rewrites its profiles on exit, so it must not be running.
+            let result = ets_launcher::install::ensure_game_closed(plan.combo.game)
+                .and_then(|()| library.create_local_profile(&plan, &documents, &transfer, &cancel));
+            if result.is_err() {
+                download::set_state(&transfer, |s| s.status = Status::Error);
+            }
+            let _ = sender.send(Event::Profile(result.map_err(|e| format!("{e:#}"))));
+            ctx.request_repaint();
+        });
+    }
+
     fn start_job(
         &mut self,
         ctx: &egui::Context,
@@ -313,6 +428,7 @@ impl QuperUi {
             }
         };
         self.job = true;
+        self.job_title = "Загрузка сборки";
         self.cancel = CancellationToken::new();
         self.note = None;
         download::set_state(&self.transfer, |s| {
@@ -424,6 +540,50 @@ impl QuperUi {
                             url.clone(),
                             ctx.load_texture(url, image, egui::TextureOptions::LINEAR),
                         );
+                    }
+                }
+                Event::Size(id, result) => {
+                    if self.sizing.as_ref().is_some_and(|(s, _, _)| *s == id) {
+                        self.sizing = None;
+                    }
+                    match result {
+                        Ok(estimate) => {
+                            if let Ok(path) = maps::config_path(&format!("quper-size-{id}.json")) {
+                                let _ = maps::write_json(&path, &estimate);
+                            }
+                            self.sizes.insert(id, Some(estimate));
+                        }
+                        Err(_) => {
+                            self.size_failed.insert(id);
+                        }
+                    }
+                }
+                Event::Profile(result) => {
+                    self.job = false;
+                    match result {
+                        Ok(created) => {
+                            let copied = if created.copied > 0 {
+                                format!(
+                                    " Скопировано {} — папка сборок на другом диске, поэтому жёсткие ссылки недоступны.",
+                                    format_bytes(created.copied)
+                                )
+                            } else {
+                                String::new()
+                            };
+                            self.inform(format!(
+                                "Профиль «{}» {}: {}. В игре выберите его в обычном списке профилей — {} модов уже включены в порядке Quper.{copied}",
+                                created.name,
+                                if created.updated {
+                                    "обновлён, карьера сохранена"
+                                } else {
+                                    "создан"
+                                },
+                                created.profile.display(),
+                                created.mods,
+                            ));
+                            self.local_profile = Some(created.profile);
+                        }
+                        Err(e) => self.fail(e),
                     }
                 }
                 Event::Job(result) => {
@@ -862,11 +1022,12 @@ impl QuperUi {
                 ui.spacing_mut().item_spacing.x = gap;
                 for (combo, progress) in row {
                     self.request_image(combo, ctx, runtime);
+                    let size = self.cached_size(combo);
                     let clicked = ui
                         .allocate_ui_with_layout(
                             vec2(card_width, 0.0),
                             Layout::top_down(Align::Min),
-                            |ui| self.card(ui, p, stripes, combo, *progress, enabled),
+                            |ui| self.card(ui, p, stripes, combo, *progress, size, enabled),
                         )
                         .inner;
                     if clicked && !menu_was_open {
@@ -958,6 +1119,7 @@ impl QuperUi {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn card(
         &self,
         ui: &mut egui::Ui,
@@ -965,6 +1127,7 @@ impl QuperUi {
         stripes: &egui::TextureHandle,
         combo: &Combo,
         progress: Option<(usize, usize, bool)>,
+        size: Option<Estimate>,
         enabled: bool,
     ) -> bool {
         let width = ui.available_width();
@@ -1049,6 +1212,18 @@ impl QuperUi {
                             if combo.convoy {
                                 ui::chip(ui, "Конвой", false, p.text2, p.line_soft, 22.0, 11.0);
                             }
+                            if let Some(estimate) = size.filter(|e| e.bytes > 0) {
+                                let prefix = if estimate.unknown == 0 { "≈" } else { "от" };
+                                ui::chip(
+                                    ui,
+                                    &format!("{prefix} {}", format_bytes(estimate.bytes)),
+                                    true,
+                                    p.text2,
+                                    p.line_soft,
+                                    22.0,
+                                    11.0,
+                                );
+                            }
                         });
                         ui.label(ui::text(
                             format!("Обновлено {}", combo.date),
@@ -1119,6 +1294,7 @@ impl QuperUi {
             self.close_details();
             return;
         }
+        self.ensure_size(ctx, runtime);
         let plan = self.plan.clone();
         let state = plan.as_ref().map(|plan| self.detail_state(plan, settings));
         let total = plan.as_ref().map_or(0, |p| p.order.len());
@@ -1191,6 +1367,7 @@ impl QuperUi {
                                     let _ = open::that(&combo.table);
                                 }
                             });
+                            self.size_row(ui, p, combo);
                             ui.add_space(6.0);
                             if plan.is_some() {
                                 ui.horizontal(|ui| {
@@ -1279,11 +1456,34 @@ impl QuperUi {
                                 {
                                     let _ = open::that(home.join(combo.game.name()));
                                 }
+                                let complete = plan.is_some()
+                                    && total > 0
+                                    && state.as_ref().is_some_and(|(missing, _)| missing.is_empty());
+                                let local = Button::new("Создать локальный профиль", Kind::Ghost)
+                                    .icon(Icon::Layers)
+                                    .enabled(can_act && complete)
+                                    .show(ui, p);
+                                if !complete {
+                                    local.on_hover_text("Доступно, когда готовы все моды");
+                                } else if local
+                                    .on_hover_text("Профиль появится в обычном списке профилей игры, моды включены в порядке Quper")
+                                    .clicked()
+                                {
+                                    self.start_local_profile(ctx, runtime, settings);
+                                }
+                                if let Some(dir) = self.local_profile.clone()
+                                    && Button::new("Папка локального профиля", Kind::Ghost)
+                                        .icon(Icon::Folder)
+                                        .show(ui, p)
+                                        .clicked()
+                                {
+                                    let _ = open::that(dir);
+                                }
                             });
                             ui.add(
                                 egui::Label::new(ui::text(
                                     if ready.is_some() {
-                                        format!("Сборка запускается в отдельном профиле с порядком модов Quper. Нужны DLC карт и версия игры {}.", combo.game_version)
+                                        format!("«Играть» запускает сборку в отдельном окружении. «Создать локальный профиль» добавляет её в обычную папку игры: профиль появится в списке профилей, моды включены в порядке Quper. Нужны DLC карт и версия игры {}.", combo.game_version)
                                     } else {
                                         format!("«Играть» станет доступна, когда будут готовы все моды. Нужны DLC карт и версия игры {}. Сборка запускается в отдельном профиле.", combo.game_version)
                                     },
@@ -1506,6 +1706,76 @@ impl QuperUi {
         }
     }
 
+    /// "Размер сборки ≈ 24 ГиБ", with progress while the hosts are being asked.
+    fn size_row(&mut self, ui: &mut egui::Ui, p: &Palette, combo: &Combo) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(ui::text("Размер сборки", 13.0, W::Semi, p.text2));
+            if let Some((id, done, sources)) = &self.sizing
+                && *id == combo.id
+            {
+                ui.add(egui::Spinner::new().size(12.0).color(p.accent));
+                ui.label(ui::text(
+                    format!(
+                        "считаем… {} / {sources}",
+                        done.load(Ordering::Relaxed).min(*sources)
+                    ),
+                    12.0,
+                    W::Regular,
+                    p.muted,
+                ));
+                return;
+            }
+            match self.cached_size(combo) {
+                Some(estimate) if estimate.bytes > 0 => {
+                    let prefix = if estimate.unknown == 0 { "≈" } else { "от" };
+                    ui.label(ui::mono_text(
+                        format!("{prefix} {}", format_bytes(estimate.bytes)),
+                        14.0,
+                        true,
+                        p.accent,
+                    ));
+                    if estimate.unknown > 0 {
+                        ui.label(ui::text(
+                            format!(
+                                "без {} {} — хостинг не сообщает размер",
+                                estimate.unknown,
+                                plural(estimate.unknown, ["файла", "файлов", "файлов"])
+                            ),
+                            12.0,
+                            W::Regular,
+                            p.muted,
+                        ));
+                    }
+                }
+                Some(_) => {
+                    ui.label(ui::text(
+                        "неизвестен — хостинги не сообщают размер",
+                        12.0,
+                        W::Regular,
+                        p.muted,
+                    ));
+                }
+                None if self.size_failed.contains(&combo.id) => {
+                    ui.label(ui::text("не удалось узнать", 12.0, W::Regular, p.muted));
+                }
+                None => {
+                    ui.label(ui::text("…", 12.0, W::Regular, p.muted));
+                }
+            }
+            if !self.preparing()
+                && self.sizing.is_none()
+                && ui::link(ui, p, "Пересчитать", 12.0, W::Semi, false).clicked()
+            {
+                self.sizes.insert(combo.id.clone(), None);
+                self.size_failed.remove(&combo.id);
+                if let Ok(path) = maps::config_path(&format!("quper-size-{}.json", combo.id)) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        });
+    }
+
     fn job_card(&mut self, ui: &mut egui::Ui, p: &Palette) {
         let transfer = download::snapshot(&self.transfer);
         ui::card(p).show(ui, |ui| {
@@ -1523,7 +1793,7 @@ impl QuperUi {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(16.0).color(p.accent));
-                        ui.label(ui::text("Загрузка сборки", 18.0, W::Extra, p.text));
+                        ui.label(ui::text(self.job_title, 18.0, W::Extra, p.text));
                     });
                     ui.add(
                         egui::Label::new(ui::text(&transfer.message, 13.0, W::Regular, p.muted))
@@ -1712,6 +1982,15 @@ fn badge(
         galley,
         color,
     );
+}
+
+/// The user's Documents folder (redirected ones included). Tests and checks can
+/// point it elsewhere with `ETS_LAUNCHER_DOCUMENTS_DIR`.
+fn documents_dir() -> Option<PathBuf> {
+    std::env::var_os("ETS_LAUNCHER_DOCUMENTS_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| directories::UserDirs::new().and_then(|d| d.document_dir().map(PathBuf::from)))
 }
 
 fn release_label(combo: &Combo) -> String {

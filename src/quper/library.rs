@@ -555,16 +555,7 @@ impl Library {
             let name = profile_name(&plan.combo);
             let dir = docs.join("profiles").join(profile::folder_name(&name));
             fs::create_dir_all(&dir)?;
-            let module = match plan.combo.game {
-                Game::Ets2 => "/map/europe.mbd",
-                Game::Ats => "/map/usa.mbd",
-            };
-            let mut bytes = profile::create(&name, module, &plan.order)?;
-            if plan.combo.game == Game::Ats {
-                bytes = String::from_utf8(bytes)?
-                    .replace("brand: scania_r", "brand: kenworth")
-                    .into_bytes();
-            }
+            let bytes = new_profile(plan.combo.game, &name, &plan.order)?;
             fs::write(dir.join("profile.sii"), bytes)?;
             fs::write(docs.join("config.cfg"), "uset r_buffer_page_size \"30\"\n")?;
             crate::maps::write_json(&staging.join(".quper-plan.json"), plan)?;
@@ -625,6 +616,184 @@ impl Library {
             .spawn()?;
         Ok(())
     }
+}
+
+/// A build added to the game's ordinary documents folder by
+/// [`Library::create_local_profile`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalProfile {
+    pub name: String,
+    pub profile: PathBuf,
+    pub mods: usize,
+    /// Bytes copied because a hard link to the library was not possible.
+    pub copied: u64,
+    /// The profile already existed: its career was kept, only the mod list changed.
+    pub updated: bool,
+}
+
+impl Library {
+    /// Adds the build to the regular game folder `documents/<game>`: packages go to
+    /// `mod/` (hard links when possible) and a local profile lists them in the
+    /// author's order. A same-named profile keeps its career and gets a backup.
+    /// The caller checks that the game is closed: it rewrites profiles on exit.
+    pub fn create_local_profile(
+        &self,
+        plan: &Plan,
+        documents: &Path,
+        transfer: &SharedTransfer,
+        cancel: &CancellationToken,
+    ) -> Result<LocalProfile> {
+        plan.validate()?;
+        let release = self.release(&plan.combo)?;
+        let _lock = self.lock(&release)?;
+        ensure!(
+            self.missing(plan)?.is_empty(),
+            "Сначала скачайте все файлы сборки"
+        );
+        let state = self.state(&plan.combo)?;
+        let game = plan.combo.game;
+        let docs = documents.join(game.name());
+        let mods = docs.join("mod");
+        fs::create_dir_all(&mods)?;
+        archive::ordinary_metadata(&mods)?;
+        let total = plan.order.len();
+        let mut names = Vec::with_capacity(total);
+        let mut copied = 0;
+        for (index, id) in plan.order.iter().enumerate() {
+            check(cancel)?;
+            let package = &state.packages[&id.to_lowercase()];
+            download::set_state(transfer, |s| {
+                s.status = Status::Installing;
+                s.name = package.filename.clone();
+                s.message = format!("Подключение модов к профилю: {} из {total}", index + 1);
+                s.downloaded = index as u64;
+                s.total = Some(total as u64);
+                s.speed = 0;
+            });
+            let source = release.join("packages").join(&package.filename);
+            let (target, stem) = local_target(&mods, package)?;
+            if !target.exists() && fs::hard_link(&source, &target).is_err() {
+                crate::install::ensure_space(&mods, package.size)?;
+                let partial = mods.join(format!("{}.launcher-part", package.filename));
+                let result =
+                    fs::copy(&source, &partial).and_then(|_| fs::rename(&partial, &target));
+                if result.is_err() {
+                    let _ = fs::remove_file(&partial);
+                }
+                result?;
+                copied += package.size;
+            }
+            // The author's identifier is kept unless the file had to be renamed.
+            names.push(if stem.eq_ignore_ascii_case(id) {
+                id.clone()
+            } else {
+                stem
+            });
+        }
+        check(cancel)?;
+        let name = profile_name(&plan.combo);
+        let dir = docs.join("profiles").join(profile::folder_name(&name));
+        let file = dir.join("profile.sii");
+        let updated = file.is_file();
+        let bytes = if updated {
+            let previous = fs::read(&file)?;
+            fs::write(dir.join("profile.sii.launcher-backup"), &previous)?;
+            profile::update(&previous, module(game), &names)?
+        } else {
+            fs::create_dir_all(&dir)?;
+            new_profile(game, &name, &names)?
+        };
+        let temporary = dir.join("profile.sii.launcher-new");
+        fs::write(&temporary, bytes)?;
+        fs::rename(&temporary, &file)?;
+        raise_buffer(&docs.join("config.cfg"))?;
+        download::set_state(transfer, |s| {
+            s.status = Status::Complete;
+            s.downloaded = total as u64;
+        });
+        Ok(LocalProfile {
+            name,
+            profile: dir,
+            mods: names.len(),
+            copied,
+            updated,
+        })
+    }
+}
+
+/// Where a package goes in the shared `mod` folder and the identifier the
+/// profile must use. Another mod with the same file name is never replaced.
+fn local_target(mods: &Path, package: &Package) -> Result<(PathBuf, String)> {
+    let path = Path::new(&package.filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .context("Некорректное имя пакета")?;
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("scs");
+    for attempt in 0..100 {
+        let candidate = if attempt == 0 {
+            stem.to_owned()
+        } else {
+            format!("{stem}_quper{attempt}")
+        };
+        let target = mods.join(format!("{candidate}.{extension}"));
+        let Ok(metadata) = fs::symlink_metadata(&target) else {
+            return Ok((target, candidate));
+        };
+        if archive::ordinary_metadata(&target).is_ok()
+            && metadata.is_file()
+            && metadata.len() == package.size
+            && crate::maps::library::digest_file(&target)? == package.sha256
+        {
+            return Ok((target, candidate));
+        }
+    }
+    anyhow::bail!("Слишком много модов с именем {}", package.filename)
+}
+
+fn module(game: Game) -> &'static str {
+    match game {
+        Game::Ets2 => "/map/europe.mbd",
+        Game::Ats => "/map/usa.mbd",
+    }
+}
+
+fn new_profile(game: Game, name: &str, mods: &[String]) -> Result<Vec<u8>> {
+    let bytes = profile::create(name, module(game), mods)?;
+    Ok(if game == Game::Ats {
+        String::from_utf8(bytes)?
+            .replace("brand: scania_r", "brand: kenworth")
+            .into_bytes()
+    } else {
+        bytes
+    })
+}
+
+/// Large map combos need a bigger render buffer; an already larger value is kept.
+fn raise_buffer(config: &Path) -> Result<()> {
+    const WANTED: u32 = 30;
+    let text = match fs::read(config) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let line = regex::Regex::new(r#"(?m)^uset r_buffer_page_size "(\d+)"\s*$"#)?;
+    let updated = match line.captures(&text) {
+        Some(found) if found[1].parse::<u32>().is_ok_and(|v| v >= WANTED) => return Ok(()),
+        Some(_) => line
+            .replace(&text, format!("uset r_buffer_page_size \"{WANTED}\""))
+            .into_owned(),
+        None => format!(
+            "{text}{}uset r_buffer_page_size \"{WANTED}\"\n",
+            if text.is_empty() || text.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            }
+        ),
+    };
+    fs::write(config, updated)?;
+    Ok(())
 }
 
 fn profile_name(combo: &Combo) -> String {

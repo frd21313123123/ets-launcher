@@ -42,7 +42,11 @@ fn main() -> anyhow::Result<()> {
     if args.get(1).is_some_and(|a| {
         matches!(
             a.as_str(),
-            "--quper-catalog" | "--quper-plan" | "--quper-download" | "--quper-file"
+            "--quper-catalog"
+                | "--quper-plan"
+                | "--quper-size"
+                | "--quper-download"
+                | "--quper-file"
         )
     }) {
         return quper_cli(&args);
@@ -458,6 +462,12 @@ fn quper_cli(args: &[String]) -> anyhow::Result<()> {
     if args[1] == "--quper-plan" {
         anyhow::ensure!(args.len() == 4, "--quper-plan <combo-id> <report.json>");
         return ets_launcher::maps::write_json(std::path::Path::new(&args[3]), &plan);
+    }
+    if args[1] == "--quper-size" {
+        anyhow::ensure!(args.len() == 4, "--quper-size <combo-id> <report.json>");
+        let estimate =
+            runtime.block_on(quper::size::estimate(&plan, Default::default(), &cancel))?;
+        return ets_launcher::maps::write_json(std::path::Path::new(&args[3]), &estimate);
     }
     anyhow::ensure!(
         args.len() == 5,
