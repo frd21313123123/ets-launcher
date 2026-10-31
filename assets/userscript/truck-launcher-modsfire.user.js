@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Truck Launcher — загрузка модов
 // @namespace    https://github.com/frd21313123123/ets-launcher
-// @version      2.1.0
+// @version      2.2.0
 // @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, Google Drive, TruckyMods, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверку Cloudflare не трогает — если она попросит, отметьте её сами.
 // @match        https://*/*
 // @grant        window.close
@@ -91,9 +91,15 @@
         }
 
         if (host === 'truckymods.io' || host === 'beta.truckymods.io') {
-            // Some mods need a signed-in account; the visitor's browser has it.
-            const button = [...document.querySelectorAll('downloadbutton button, downloadbutton a, button, a.btn')].find(b => visible(b) && /^download\b/i.test(text(b)) && !/premium|client|install/i.test(text(b)));
-            if (button && once('trucky', () => button.click())) finished();
+            // The mod's own "Download (5.7 MB)" link to …/download/latest (or a
+            // build number); banners for Trucky's apps are left alone. Some
+            // mods need a signed-in account, which the visitor's browser has.
+            const page = location.pathname.replace(/\/$/, '');
+            const link = [...document.querySelectorAll('a[href]')].find(a => {
+                const url = https(a.href);
+                return url && url.hostname === location.hostname && url.pathname.startsWith(page + '/download/') && /\/download\/(latest|\d+)$/.test(url.pathname);
+            });
+            if (link) { done = true; clearInterval(timer); link.click(); finished(); }
             return;
         }
 
