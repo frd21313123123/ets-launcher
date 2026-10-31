@@ -519,11 +519,13 @@ impl QuperUi {
         // once every part is there and no download is still running.
         let mut parts: BTreeMap<String, BTreeMap<u32, PathBuf>> = BTreeMap::new();
         let mut downloading = false;
+        let mut unfinished = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if quper::files::unfinished_download(&name) {
                 downloading = true;
+                unfinished.push(name.to_lowercase());
                 continue;
             }
             if let Some((base, number)) = quper::files::split_part(&name) {
@@ -534,7 +536,9 @@ impl QuperUi {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
-            if !meta.is_file() {
+            // Firefox and Zen create the final name empty while the data goes to
+            // a separate ".part" file; an empty file is never a finished download.
+            if !meta.is_file() || meta.len() == 0 {
                 continue;
             }
             // New files are taken; an older one only when it is a mod the open
@@ -569,7 +573,15 @@ impl QuperUi {
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
             let Some((base, _)) = quper::files::split_part(name) else {
-                return true;
+                // Firefox writes "name.XXXX.ext.part" next to the final "name.ext".
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_lowercase();
+                return !unfinished
+                    .iter()
+                    .any(|u| u.starts_with(&format!("{stem}.")));
             };
             let group = &parts[&base];
             let contiguous = group.keys().copied().eq(1..=group.len() as u32);

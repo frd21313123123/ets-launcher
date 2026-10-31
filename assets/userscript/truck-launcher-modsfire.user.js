@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Truck Launcher — загрузка модов
 // @namespace    https://github.com/frd21313123123/ets-launcher
-// @version      2.2.0
+// @version      2.3.0
 // @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, Google Drive, TruckyMods, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверку Cloudflare не трогает — если она попросит, отметьте её сами.
 // @match        https://*/*
 // @grant        window.close
@@ -71,7 +71,7 @@
             const fileLink = url => /\.(scs|zip|rar|7z|\d{3})$/i.test(url.pathname);
             const link = [...document.querySelectorAll('a[href]')].find(a => {
                 const url = https(a.href);
-                const labelled = /^\s*(download|скачать|pobierz)\b/i.test(text(a)) || /download/i.test(a.className);
+                const labelled = /^\s*(download|скачать|pobierz)(?![\p{L}\p{N}])/iu.test(text(a)) || /download/i.test(a.className);
                 return url && labelled && (fileHosts.test(url.hostname) || fileLink(url));
             });
             if (link) {
@@ -94,11 +94,14 @@
             // The mod's own "Download (5.7 MB)" link to …/download/latest (or a
             // build number); banners for Trucky's apps are left alone. Some
             // mods need a signed-in account, which the visitor's browser has.
+            // Older builds in the versions list are icon links without a label.
             const page = location.pathname.replace(/\/$/, '');
-            const link = [...document.querySelectorAll('a[href]')].find(a => {
+            const own = [...document.querySelectorAll('a[href]')].filter(a => {
                 const url = https(a.href);
-                return url && url.hostname === location.hostname && url.pathname.startsWith(page + '/download/') && /\/download\/(latest|\d+)$/.test(url.pathname);
+                return url && url.hostname === location.hostname && url.pathname.startsWith(page + '/download/');
             });
+            const link = own.find(a => https(a.href).pathname.endsWith('/download/latest'))
+                || own.find(a => /\/download\/\d+$/.test(https(a.href).pathname) && /^download\b/i.test(text(a)));
             if (link) { done = true; clearInterval(timer); link.click(); finished(); }
             return;
         }
@@ -143,5 +146,6 @@
         const op = form.querySelector('input[name="op"]').value;
         if (button && !button.disabled) once(op, () => button.click());
     }, 1000);
-    setTimeout(() => clearInterval(timer), 15 * 60 * 1000);
+    // Cloudflare's check waits for the visitor, who may come back much later.
+    setTimeout(() => clearInterval(timer), 3 * 60 * 60 * 1000);
 })();
