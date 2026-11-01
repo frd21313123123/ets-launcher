@@ -711,6 +711,7 @@ impl Library {
         let mods = docs.join("mod");
         fs::create_dir_all(&mods)?;
         archive::ordinary_metadata(&mods)?;
+        remove_dangling_links(&mods);
         let total = order.len();
         let mut names = Vec::with_capacity(total);
         let mut copied = 0;
@@ -774,6 +775,22 @@ impl Library {
             copied,
             updated,
         })
+    }
+}
+
+/// Deletes symbolic links in `mods` whose target no longer exists. The game
+/// crashes at start when a mod entry cannot be opened; only the link itself is
+/// removed, never a real file.
+fn remove_dangling_links(mods: &Path) {
+    let Ok(entries) = fs::read_dir(mods) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_link = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+        if is_link && fs::metadata(&path).is_err() {
+            let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir(&path));
+        }
     }
 }
 
