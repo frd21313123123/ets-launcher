@@ -107,6 +107,9 @@ struct DownloadWatch {
     taken: BTreeSet<PathBuf>,
     /// Unfinished downloads already seen; a new one means the browser started a file.
     started: BTreeSet<PathBuf>,
+    /// Final names (lowercase) of downloads seen unfinished: their arrival is
+    /// the end of a download already counted, not the start of a new one.
+    expected: BTreeSet<String>,
 }
 
 pub struct QuperUi {
@@ -513,7 +516,20 @@ impl QuperUi {
             folder.display()
         ));
         let now = Instant::now();
-        let keep = self.downloads.take();
+        let (taken, mut started, mut expected) = self
+            .downloads
+            .take()
+            .map(|w| (w.taken, w.started, w.expected))
+            .unwrap_or_default();
+        // Downloads already running belong to earlier pages: neither they nor
+        // their completion may count as the next page's start.
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(target) = quper::files::download_target(&name) {
+                started.insert(entry.path());
+                expected.insert(target);
+            }
+        }
         self.downloads = Some(DownloadWatch {
             folder,
             // Files that appear from now on; a little slack for clock rounding.
@@ -521,8 +537,9 @@ impl QuperUi {
             until: now + Duration::from_secs(30 * 60),
             next_scan: now,
             pending: BTreeMap::new(),
-            taken: keep.map(|w| w.taken).unwrap_or_default(),
-            started: BTreeSet::new(),
+            taken,
+            started,
+            expected,
         });
     }
 
@@ -552,6 +569,9 @@ impl QuperUi {
         // Split archives (ProMods ships "….zip.001", "….002"…) are taken only
         // once every part is there and no download is still running.
         let mut parts: BTreeMap<String, BTreeMap<u32, PathBuf>> = BTreeMap::new();
+        // Parts downloaded before the watch started: complete, but they join
+        // a group only when a new part of it arrives.
+        let mut old_parts = BTreeSet::new();
         let mut downloading = false;
         let mut unfinished = Vec::new();
         // The browser began a new mod download: the queue moves on without
@@ -561,19 +581,26 @@ impl QuperUi {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if quper::files::unfinished_download(&name) {
-                downloading = true;
-                unfinished.push(name.to_lowercase());
-                let fresh = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|m| m >= watch.since);
+                let modified = entry.metadata().and_then(|m| m.modified()).ok();
+                // A ".part" untouched for 10 minutes is an abandoned download
+                // (a closed browser, a failed server); it must not hold back
+                // split archives forever.
+                let active = modified.is_some_and(|m| {
+                    m.elapsed()
+                        .is_ok_and(|age| age < Duration::from_secs(10 * 60))
+                });
+                if active {
+                    downloading = true;
+                    unfinished.push(name.to_lowercase());
+                }
+                let fresh = modified.is_some_and(|m| m >= watch.since);
                 if fresh && quper::files::unfinished_mod(&name) && watch.started.insert(path) {
                     began = true;
                 }
+                if let Some(target) = quper::files::download_target(&name) {
+                    watch.expected.insert(target);
+                }
                 continue;
-            }
-            if let Some((base, number)) = quper::files::split_part(&name) {
-                parts.entry(base).or_default().insert(number, path.clone());
             }
             // Browsers write .crdownload/.part files first; only the final name counts.
             if !quper::files::allowed_filename(&name) || watch.taken.contains(&path) {
@@ -588,6 +615,17 @@ impl QuperUi {
             // New files are taken; an older one only when it is a mod the open
             // build still misses (downloaded earlier, possibly as "mod(1).scs").
             let fresh = !meta.modified().is_ok_and(|m| m < watch.since);
+            if let Some((base, number)) = quper::files::split_part(&name) {
+                let group = parts.entry(base).or_default();
+                // A part saved again ("pack.7z(1).001") replaces an older copy.
+                if fresh || !group.contains_key(&number) {
+                    group.insert(number, path.clone());
+                }
+                if !fresh {
+                    old_parts.insert(path.clone());
+                    continue;
+                }
+            }
             let wanted = || {
                 let stem = path
                     .file_stem()
@@ -608,7 +646,12 @@ impl QuperUi {
                 _ => {
                     // A small file can finish between two scans without a
                     // visible ".part"; its first sighting counts as a start.
-                    began |= fresh && !watch.pending.contains_key(&path);
+                    // A file whose ".part" was seen is the end of a download
+                    // already counted: a large file finishing must not open
+                    // the next page while the current one has not started.
+                    began |= fresh
+                        && !watch.pending.contains_key(&path)
+                        && !watch.expected.contains(&name.to_lowercase());
                     watch.pending.insert(path, (meta.len(), now));
                 }
             }
@@ -632,16 +675,42 @@ impl QuperUi {
             };
             let group = &parts[&base];
             let contiguous = group.keys().copied().eq(1..=group.len() as u32);
-            let all_settled = group
-                .values()
-                .all(|part| settled.contains(part) || watch.taken.contains(part));
+            let all_settled = group.values().all(|part| {
+                settled.contains(part) || watch.taken.contains(part) || old_parts.contains(part)
+            });
             !downloading && contiguous && all_settled
         });
         let arrived = !ready.is_empty();
+        let mut groups = BTreeSet::new();
+        let mut failures = Vec::new();
         for path in ready {
             watch.pending.remove(&path);
             watch.taken.insert(path.clone());
-            self.imports.push(path);
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            match quper::files::split_part(name) {
+                Some((base, _)) => {
+                    groups.insert(base);
+                }
+                None => self.imports.push(path),
+            }
+        }
+        // A whole split archive goes to the import under one name, as the
+        // archiver finds the other parts by the first one's name.
+        for base in groups {
+            let group = &parts[&base];
+            for part in group.values() {
+                watch.taken.insert(part.clone());
+            }
+            match quper::files::uniform_parts(&base, group) {
+                Ok(paths) => self.imports.extend(paths),
+                Err(e) => failures.push(format!("Не удалось собрать части архива {base}: {e:#}")),
+            }
+        }
+        for failure in failures {
+            self.fail(failure);
         }
         if (arrived || began)
             && let Some(queue) = &mut self.external

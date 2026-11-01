@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Truck Launcher — загрузка модов
 // @namespace    https://github.com/frd21313123123/ets-launcher
-// @version      3.10.0
-// @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, Google Drive, TruckyMods, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверку Cloudflare не трогает — если она попросит, отметьте её сами.
+// @version      3.17.0
+// @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, WDfiles, ProMods, Google Drive, TruckyMods, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверки сайтов (Cloudflare, выбор цвета на WDfiles) не трогает — их проходите вы.
 // @match        https://*/*
 // @grant        window.close
+// @grant        GM_openInTab
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -19,7 +20,7 @@
 
     // The script's state is shown in the tab title, e.g. "[TL 3.0: жду CAPTCHA /
     // Cloudflare]", so the visitor (and the launcher's tests) can see where it is.
-    const VERSION = '3.10';
+    const VERSION = '3.17';
     let shown = null;
     const untitled = () => document.title.replace(/^\[TL [^\]]*\]\s*/, '');
     const status = message => {
@@ -196,6 +197,63 @@
             if (widget) once('show-check', () => widget.scrollIntoView({ block: 'center' }));
             return;
         }
+        // A host's own human check works the same way: WDfiles asks to press the
+        // button of a named colour. The visitor answers it; the script waits.
+        const colours = all('button.btn-color').filter(visible);
+        if (colours.length > 1) {
+            status('жду проверку сайта (выберите цвет)');
+            once('show-colours', () => colours[0].scrollIntoView({ block: 'center' }));
+            readyAt = Date.now();
+            return;
+        }
+
+        if (host === 'promods.net') {
+            // setup.php: the free "Обычная загрузка" (never the paid fast one),
+            // then the download step itself.
+            // The choice buttons are styled blocks (div.pm-choice-btn.free).
+            const free = all('.pm-choice-btn.free').find(visible) ||
+                control(/^(обычная загрузка|regular download|normal download|free download)/i, 'a[href], button, .pm-choice-btn');
+            if (free) {
+                if (once('promods-free', () => free.click())) status(`нажал «${label(free)}»`);
+                return;
+            }
+            // "Скачать файлы": one "СКАЧАТЬ" link per part of the split archive,
+            // with the site's 5 minutes between parts. Each part opens in a
+            // background tab carrying the mark (a script's new tab would be a
+            // blocked popup), and this page stays to open the next one.
+            const parts = all('a.pm-dl-btn.free[href]').filter(visible);
+            if (parts.length) {
+                const key = 'tl-promods-opened';
+                const opened = JSON.parse(sessionStorage.getItem(key) || '[]');
+                const next = parts.find(a => !opened.includes(a.href));
+                if (!next) { finished(); return; }
+                const part = `часть ${opened.length + 1} из ${parts.length}`;
+                const last = Number(sessionStorage.getItem(`${key}:at`) || 0);
+                const waiting = next.classList.contains('disabled') || next.getAttribute('aria-disabled') === 'true' ||
+                    getComputedStyle(next).pointerEvents === 'none' || (opened.length > 0 && Date.now() - last < 5 * 60 * 1000 + 5000);
+                if (waiting) {
+                    const left = Math.max(0, Math.ceil((last + 5 * 60 * 1000 + 5000 - Date.now()) / 60000));
+                    status(`ProMods: жду паузу сайта (${part}${left ? `, ~${left} мин` : ''})`);
+                    return;
+                }
+                const url = https(next.href);
+                if (!url) { unknown(); return; }
+                url.hash = MARK;
+                opened.push(next.href);
+                sessionStorage.setItem(key, JSON.stringify(opened));
+                sessionStorage.setItem(`${key}:at`, String(Date.now()));
+                GM_openInTab(url.href, { active: false, insert: true });
+                status(`ProMods: открыл ${part}`);
+                return;
+            }
+            // getdl.php: "Download promods-….7z.001" starts the part by itself.
+            if (location.pathname === '/getdl.php') {
+                if (Date.now() - readyAt > 60000) finished(); else status('ProMods: часть скачивается');
+                return;
+            }
+            unknown();
+            return;
+        }
 
         // An author's own page: follow its first "Download" link. A link to a
         // file host gets the mark carried along; a link straight to a mod file
@@ -263,6 +321,49 @@
             // The "download anyway" confirmation for large files.
             const confirm = first('#uc-download-link, form#download-form button, form#download-form input[type="submit"]');
             if (confirm) { confirm.click(); finished(); } else { unknown(); }
+            return;
+        }
+
+        if (host === 'wdfiles.ru') {
+            // After the colour check: "Скачать / Смотреть", which leads back to
+            // the same address with the download allowed. Pressed at most three
+            // times per file, so a page that keeps coming back cannot loop forever.
+            const file = all('a[href]').find(a => visible(a) && /\.(scs|zip|rar|7z|\d{3})(\?|$)/i.test(https(a.href)?.pathname || ''));
+            if (file) {
+                location.assign(file.href);
+                finished();
+                return;
+            }
+            // Each load runs a 5-second timer first; the first press reloads the
+            // page, the second asks "download the file?" and then downloads.
+            if (Date.now() - readyAt < 7000) { status('жду таймер сайта'); return; }
+            const button = control(/^скачать(?![\p{L}])/iu, 'a[href], button, input[type="submit"]');
+            const key = `tl-wdfiles:${location.pathname}`;
+            const pressed = Number(sessionStorage.getItem(key) || 0);
+            if (button && pressed < 3) {
+                if (pressed > 0) {
+                    // The site's own "download the file?" question gets "yes";
+                    // any other question still goes to the visitor. A page
+                    // script, as the question is asked by the page itself.
+                    once('wdfiles-confirm', () => {
+                        const script = document.createElement('script');
+                        script.textContent = `(() => { const ask = window.confirm.bind(window);
+                            window.confirm = message => /скача|загруз|download/i.test(String(message)) || ask(message); })();`;
+                        document.documentElement.appendChild(script);
+                        script.remove();
+                    });
+                }
+                once('wdfiles-download', () => {
+                    sessionStorage.setItem(key, String(pressed + 1));
+                    button.click();
+                });
+                // After the second press the download starts (or the page
+                // loads again and this script carries on there).
+                if (pressed > 0) finished(); else status(`нажал «${label(button)}»`);
+                return;
+            }
+            // Pressed twice already: the download was asked for.
+            if (pressed >= 2) finished(); else unknown();
             return;
         }
 

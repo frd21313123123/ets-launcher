@@ -105,6 +105,8 @@ pub fn split_part(name: &str) -> Option<(String, u32)> {
         && number.bytes().all(|b| b.is_ascii_digit())
         && !base.is_empty()
     {
+        // A part saved again is "pack.7z(1).001"; it belongs with "pack.7z.002".
+        let base = browser_copy_base(base).unwrap_or(base);
         return Some((base.to_owned(), number.parse().ok()?));
     }
     let stem = lower.strip_suffix(".rar")?;
@@ -113,6 +115,59 @@ pub fn split_part(name: &str) -> Option<(String, u32)> {
         return None;
     }
     Some((format!("{base}.rar"), number.parse().ok()?))
+}
+
+/// The parts of one split archive under one name, as the archiver finds the
+/// other parts by the first one's name. Parts already named alike are used as
+/// they are; otherwise ("pack.7z(1).001" next to "pack.7z.002") they are linked
+/// (or copied) into a new temporary folder under `base`'s name. The visitor's
+/// own files are never renamed.
+pub fn uniform_parts(
+    base: &str,
+    parts: &std::collections::BTreeMap<u32, std::path::PathBuf>,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let uniform = |original: &str| {
+        let lower = original.to_ascii_lowercase();
+        if let Some(stem) = lower.strip_suffix(".rar")
+            && let Some((_, number)) = stem.rsplit_once(".part")
+        {
+            return format!(
+                "{}.part{number}.rar",
+                base.strip_suffix(".rar").unwrap_or(base)
+            );
+        }
+        let number = lower.rsplit_once('.').map_or("", |(_, n)| n);
+        format!("{base}.{number}")
+    };
+    let name = |path: &std::path::Path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    if parts
+        .values()
+        .all(|path| name(path).to_ascii_lowercase() == uniform(&name(path)))
+    {
+        return Ok(parts.values().cloned().collect());
+    }
+    let folder = std::env::temp_dir().join(format!(
+        "ets-launcher-parts-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir(&folder)?;
+    let mut linked = Vec::new();
+    for path in parts.values() {
+        let target = folder.join(uniform(&name(path)));
+        if std::fs::hard_link(path, &target).is_err() {
+            std::fs::copy(path, &target)?;
+        }
+        linked.push(target);
+    }
+    Ok(linked)
 }
 
 /// A browser's unfinished download (Chrome, Edge, Firefox, Zen, Opera, Safari).
@@ -128,6 +183,28 @@ pub fn unfinished_download(name: &str) -> bool {
     ]
     .iter()
     .any(|suffix| lower.ends_with(suffix))
+}
+
+/// The final name (lowercase) an unfinished download will get: Chrome's
+/// "mod.zip.crdownload" becomes "mod.zip", Firefox's "mod.Ab12Cd3_.scs.part"
+/// (a random 8-character piece after the first dot) becomes "mod.scs".
+pub fn download_target(unfinished: &str) -> Option<String> {
+    let lower = unfinished.to_lowercase();
+    let (name, suffix) = lower.rsplit_once('.')?;
+    if suffix != "part" {
+        return unfinished_download(&lower).then(|| name.to_owned());
+    }
+    let pieces = name.split('.').collect::<Vec<_>>();
+    let random = (1..pieces.len().saturating_sub(1)).find(|&i| {
+        pieces[i].len() == 8
+            && pieces[i]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    });
+    Some(match random {
+        Some(i) => [&pieces[..i], &pieces[i + 1..]].concat().join("."),
+        None => name.to_owned(),
+    })
 }
 
 /// An unfinished download that will become a mod or archive: Firefox's
@@ -611,6 +688,48 @@ mod tests {
             Some(("promods.7z".into(), 12))
         );
         assert_eq!(split_part("map.part2.rar"), Some(("map.rar".into(), 2)));
+        assert_eq!(
+            split_part("promods-tgs-v170.7z(1).001"),
+            Some(("promods-tgs-v170.7z".into(), 1))
+        );
+        let downloads = tempfile::tempdir().unwrap();
+        let part = |name: &str| {
+            let path = downloads.path().join(name);
+            std::fs::write(&path, name).unwrap();
+            path
+        };
+        let same = std::collections::BTreeMap::from([
+            (1, part("ProMods.7z.001")),
+            (2, part("ProMods.7z.002")),
+        ]);
+        assert_eq!(
+            uniform_parts("promods.7z", &same).unwrap(),
+            same.values().cloned().collect::<Vec<_>>()
+        );
+        let mixed = std::collections::BTreeMap::from([
+            (1, part("promods-tgs-v170.7z(1).001")),
+            (2, part("promods-tgs-v170.7z.002")),
+        ]);
+        let linked = uniform_parts("promods-tgs-v170.7z", &mixed).unwrap();
+        let names = linked
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["promods-tgs-v170.7z.001", "promods-tgs-v170.7z.002"]
+        );
+        assert_eq!(
+            std::fs::read(&linked[0]).unwrap(),
+            b"promods-tgs-v170.7z(1).001"
+        );
+        assert!(
+            downloads
+                .path()
+                .join("promods-tgs-v170.7z(1).001")
+                .is_file()
+        );
+        std::fs::remove_dir_all(linked[0].parent().unwrap()).unwrap();
         assert_eq!(split_part("map.rar"), None);
         assert_eq!(split_part("promods-eu-map-v284.scs"), None);
         assert!(unfinished_download("promods.zip.001.crdownload"));
@@ -621,6 +740,17 @@ mod tests {
         assert!(unfinished_mod("Unconfirmed 812345.crdownload"));
         assert!(!unfinished_mod("video.mp4.part"));
         assert!(!unfinished_mod("map.part2.rar"));
+        let target = |name| download_target(name).unwrap();
+        assert_eq!(
+            target("BXPrcRussiaPoland161(2).yMuziJkb.scs.part"),
+            "bxprcrussiapoland161(2).scs"
+        );
+        assert_eq!(
+            target("Koromyslovo Add-on for Project Russia 1.QI_h2t9u.5(6).scs.part"),
+            "koromyslovo add-on for project russia 1.5(6).scs"
+        );
+        assert_eq!(target("promods.zip.001.crdownload"), "promods.zip.001");
+        assert_eq!(target("VolgaMap_1_5_3.scs.part"), "volgamap_1_5_3.scs");
     }
 
     #[test]
