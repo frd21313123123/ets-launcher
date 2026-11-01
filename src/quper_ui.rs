@@ -680,7 +680,6 @@ impl QuperUi {
             });
             !downloading && contiguous && all_settled
         });
-        let arrived = !ready.is_empty();
         let mut groups = BTreeSet::new();
         let mut failures = Vec::new();
         for path in ready {
@@ -712,7 +711,10 @@ impl QuperUi {
         for failure in failures {
             self.fail(failure);
         }
-        if (arrived || began)
+        // Only a start moves the queue on: a file arriving is the end of a
+        // download some earlier page began (a large one can take minutes),
+        // not a sign that the current page got going.
+        if began
             && let Some(queue) = &mut self.external
             && queue.current.is_some()
             && queue.advance_at.is_none()

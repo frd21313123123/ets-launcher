@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Truck Launcher — загрузка модов
 // @namespace    https://github.com/frd21313123123/ets-launcher
-// @version      3.17.0
+// @version      3.18.0
 // @description  Нажимает обычные бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, WDfiles, ProMods, Google Drive, TruckyMods, страницы авторов) во вкладках, которые открыл Truck Launcher. Проверки сайтов (Cloudflare, выбор цвета на WDfiles) не трогает — их проходите вы.
 // @match        https://*/*
 // @grant        window.close
@@ -20,7 +20,7 @@
 
     // The script's state is shown in the tab title, e.g. "[TL 3.0: жду CAPTCHA /
     // Cloudflare]", so the visitor (and the launcher's tests) can see where it is.
-    const VERSION = '3.17';
+    const VERSION = '3.18';
     let shown = null;
     const untitled = () => document.title.replace(/^\[TL [^\]]*\]\s*/, '');
     const status = message => {
@@ -334,25 +334,24 @@
                 finished();
                 return;
             }
-            // Each load runs a 5-second timer first; the first press reloads the
+            // Each load runs a short timer first; the first press reloads the
             // page, the second asks "download the file?" and then downloads.
+            // The button is a plain <a onclick> with no address of its own.
             if (Date.now() - readyAt < 7000) { status('жду таймер сайта'); return; }
-            const button = control(/^скачать(?![\p{L}])/iu, 'a[href], button, input[type="submit"]');
+            const button = control(/^скачать(?![\p{L}])/iu, 'a[href], a[onclick], button, input[type="submit"]');
             const key = `tl-wdfiles:${location.pathname}`;
             const pressed = Number(sessionStorage.getItem(key) || 0);
             if (button && pressed < 3) {
-                if (pressed > 0) {
-                    // The site's own "download the file?" question gets "yes";
-                    // any other question still goes to the visitor. A page
-                    // script, as the question is asked by the page itself.
-                    once('wdfiles-confirm', () => {
-                        const script = document.createElement('script');
-                        script.textContent = `(() => { const ask = window.confirm.bind(window);
-                            window.confirm = message => /скача|загруз|download/i.test(String(message)) || ask(message); })();`;
-                        document.documentElement.appendChild(script);
-                        script.remove();
-                    });
-                }
+                // The site's own "download the file?" question gets "yes";
+                // any other question still goes to the visitor. A page
+                // script, as the question is asked by the page itself.
+                once('wdfiles-confirm', () => {
+                    const script = document.createElement('script');
+                    script.textContent = `(() => { const ask = window.confirm.bind(window);
+                        window.confirm = message => /скача|загруз|download/i.test(String(message)) || ask(message); })();`;
+                    document.documentElement.appendChild(script);
+                    script.remove();
+                });
                 once('wdfiles-download', () => {
                     sessionStorage.setItem(key, String(pressed + 1));
                     button.click();
