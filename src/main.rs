@@ -742,6 +742,14 @@ impl Launcher {
         }
     }
 
+    fn effective_channel(&self, game: Game) -> Channel {
+        let preferred = self.settings.channel();
+        match &self.catalogs[game.index()].catalog {
+            Some(catalog) => catalog.effective_channel(preferred),
+            None => preferred,
+        }
+    }
+
     fn start_install(&mut self) {
         if download::snapshot(&self.state).active() {
             return;
@@ -774,7 +782,7 @@ impl Launcher {
         }
         self.runtime.as_ref().unwrap().spawn(install::run(
             game,
-            self.settings.channel(),
+            self.effective_channel(game),
             self.settings.source(game).to_owned(),
             self.settings.download_directory(game),
             directory,
@@ -1128,7 +1136,7 @@ impl Launcher {
             self.note = None;
         }
 
-        let channel = self.settings.channel();
+        let channel = self.effective_channel(game);
         let release = catalog
             .as_ref()
             .and_then(|c| c.select(channel).ok())
@@ -1245,7 +1253,7 @@ impl Launcher {
             .collect::<Vec<_>>();
         let selected = channels
             .iter()
-            .position(|(c, _)| *c == self.settings.channel())
+            .position(|(c, _)| *c == self.effective_channel(game))
             .unwrap_or(0);
         if let Some(index) = ui::segmented(ui, &p, selected, &segments, 40.0, 14.0, p.bg, 12)
             && index != selected

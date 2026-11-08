@@ -241,3 +241,18 @@ async fn follows_an_updated_source_slug_before_resolving_the_download_api() {
     assert!(catalog.select(Channel::Beta).is_ok());
     server.await.unwrap();
 }
+
+#[test]
+fn only_beta_labelled_file_is_used_when_the_stable_branch_is_selected() {
+    let html = r#"<main id="post-item" data-post-id="100" data-download-allowed="1"><h1>ETS2</h1><div class="article-content">
+      <pg-file data-file-id="1" data-name="ETS2_dlc_maps_1.62.0.12s_BETA.rar" data-text="ETS2 DLC Unlocker 1.62.0.12s BETA (works on release 1.62.1.0s)" data-can-torrent-download="1"></pg-file>
+    </div></main>"#;
+    let catalog = parse_catalog(html, "").unwrap();
+    assert!(catalog.select(Channel::Stable).is_err());
+    assert_eq!(catalog.effective_channel(Channel::Stable), Channel::Beta);
+    assert!(catalog.select(catalog.effective_channel(Channel::Stable)).is_ok());
+
+    let both = parse_catalog(&page(Game::Ets2, "1.0.0.1s", true), "").unwrap();
+    assert_eq!(both.effective_channel(Channel::Stable), Channel::Stable);
+    assert_eq!(both.effective_channel(Channel::Beta), Channel::Beta);
+}
