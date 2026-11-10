@@ -250,7 +250,11 @@ fn only_beta_labelled_file_is_used_when_the_stable_branch_is_selected() {
     let catalog = parse_catalog(html, "").unwrap();
     assert!(catalog.select(Channel::Stable).is_err());
     assert_eq!(catalog.effective_channel(Channel::Stable), Channel::Beta);
-    assert!(catalog.select(catalog.effective_channel(Channel::Stable)).is_ok());
+    assert!(
+        catalog
+            .select(catalog.effective_channel(Channel::Stable))
+            .is_ok()
+    );
 
     let both = parse_catalog(&page(Game::Ets2, "1.0.0.1s", true), "").unwrap();
     assert_eq!(both.effective_channel(Channel::Stable), Channel::Stable);
