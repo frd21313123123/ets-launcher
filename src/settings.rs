@@ -26,6 +26,31 @@ pub struct Settings {
     pub mod_catalog_source: Option<String>,
     #[serde(default)]
     pub quper_library: Option<PathBuf>,
+    #[serde(default)]
+    pub theme: Theme,
+    /// Browser for downloads the launcher hands off (`None`: the system default).
+    #[serde(default)]
+    pub download_browser: Option<PathBuf>,
+    /// Where that browser saves files (`None`: the system Downloads folder).
+    #[serde(default)]
+    pub browser_downloads: Option<PathBuf>,
+    /// Files the launcher cannot download itself (ModsFire, checks on file
+    /// hosts, authors' pages) go to the system browser queue instead of the
+    /// built-in browser.
+    #[serde(default = "enabled", alias = "modsfire_in_browser")]
+    pub external_downloads: bool,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    Black,
+    Light,
 }
 
 impl Default for Settings {
@@ -41,6 +66,10 @@ impl Default for Settings {
             mod_library: None,
             mod_catalog_source: None,
             quper_library: None,
+            theme: Theme::Black,
+            download_browser: None,
+            browser_downloads: None,
+            external_downloads: true,
             output: UserDirs::new()
                 .and_then(|dirs| dirs.download_dir().map(|dir| dir.join("ETS Launcher")))
                 .unwrap_or_else(|| PathBuf::from("downloads")),

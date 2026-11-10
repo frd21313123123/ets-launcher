@@ -82,7 +82,8 @@ pub fn browser_help(url: &str) -> String {
         .unwrap_or_default();
     match host.as_str() {
         "modsfire.com"|"www.modsfire.com"=>"Бесплатно без регистрации: нажмите Generate Link, затем Download. Install Mod / Premium — отдельный платный вариант; он не нужен для скачивания файла.".into(),
-        "sharemods.com"|"www.sharemods.com"=>"Бесплатная загрузка: Create download link → Download. Дождитесь таймера сайта. Готовый файл автоматически попадёт в установщик.".into(),
+        "sharemods.com"|"www.sharemods.com"=>"Лаунчер сам дождётся таймера и проверки Cloudflare и нажмёт Download. Если Cloudflare попросит отметить «Я человек», отметьте — дальше загрузка продолжится автоматически, и файл попадёт в установщик.".into(),
+        "mods.to"|"www.mods.to"=>"Лаунчер сам дождётся проверки Cloudflare и нажмёт Start now. Если Cloudflare попросит отметить «Я человек», отметьте — остальное произойдёт автоматически.".into(),
         _=>DownloadAccess::PublicWebsite.message().into(),
     }
 }

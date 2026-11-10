@@ -76,6 +76,24 @@ impl Catalog {
         Ok(candidates[0])
     }
 
+    /// The preferred branch when the page has an archive for it, otherwise the
+    /// other branch if only that one exists. Pages often publish a single file
+    /// labelled "BETA" that the author says also works on the release branch.
+    pub fn effective_channel(&self, preferred: Channel) -> Channel {
+        if self.select(preferred).is_ok() {
+            return preferred;
+        }
+        let other = match preferred {
+            Channel::Stable => Channel::Beta,
+            Channel::Beta => Channel::Stable,
+        };
+        if self.select(other).is_ok() {
+            other
+        } else {
+            preferred
+        }
+    }
+
     pub fn validate_for(&self, game: Game) -> Result<()> {
         ensure!(
             self.releases.len() <= 100,

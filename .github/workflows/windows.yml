@@ -56,6 +56,9 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Test browser CAPTCHA lifecycle
+        run: node --test tests/browser_captcha.cjs
+
       - name: Build distribution
         run: ./scripts/package.ps1 -Target $env:CARGO_BUILD_TARGET
 

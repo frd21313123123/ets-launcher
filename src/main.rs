@@ -1,12 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod browser_smoke;
+mod browsers;
+mod clipboard_files;
 mod mod_browser;
 mod quper_ui;
+mod ui;
+#[cfg(debug_assertions)]
+mod ui_script;
+mod userscript;
 
 use anyhow::Context;
 
-use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
+use eframe::egui::{
+    self, Align, Color32, Layout, Margin, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2,
+};
 use ets_launcher::{
     SOURCE_PAGE,
     catalog::{CatalogCache, CatalogState, REFRESH_INTERVAL, RETRY_INTERVAL},
@@ -14,21 +22,16 @@ use ets_launcher::{
     format_bytes, game,
     game::{Channel, Game},
     install, playground,
-    settings::Settings,
+    settings::{Settings, Theme},
 };
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
-
-const BG: Color32 = Color32::from_rgb(13, 18, 24);
-const PANEL: Color32 = Color32::from_rgb(20, 27, 35);
-const LINE: Color32 = Color32::from_rgb(42, 54, 66);
-const MUTED: Color32 = Color32::from_rgb(143, 160, 175);
-const GREEN: Color32 = Color32::from_rgb(104, 224, 164);
+use ui::{Button, Icon, Kind, Palette, W};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -42,7 +45,11 @@ fn main() -> anyhow::Result<()> {
     if args.get(1).is_some_and(|a| {
         matches!(
             a.as_str(),
-            "--quper-catalog" | "--quper-plan" | "--quper-download" | "--quper-file"
+            "--quper-catalog"
+                | "--quper-plan"
+                | "--quper-size"
+                | "--quper-download"
+                | "--quper-file"
         )
     }) {
         return quper_cli(&args);
@@ -337,8 +344,8 @@ fn main() -> anyhow::Result<()> {
     ))?);
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 850.0])
-            .with_min_inner_size([980.0, 640.0])
+            .with_inner_size([1280.0, 860.0])
+            .with_min_inner_size([1000.0, 660.0])
             .with_title("ETS & ATS Launcher")
             .with_icon(app_icon.clone()),
         renderer: eframe::Renderer::Glow,
@@ -348,16 +355,21 @@ fn main() -> anyhow::Result<()> {
         "ETS & ATS Launcher",
         native_options,
         Box::new(move |cc| {
-            configure(&cc.egui_ctx);
+            let settings = Settings::load();
+            let palette = ui::palette(settings.theme);
+            ui::install_fonts(&cc.egui_ctx);
+            ui::apply_theme(&cc.egui_ctx, &palette);
+            let mut rgba = app_icon.rgba.clone();
+            ui::tint_logo(&mut rgba);
             let logo = cc.egui_ctx.load_texture(
                 "truck-launcher-logo",
                 egui::ColorImage::from_rgba_unmultiplied(
                     [app_icon.width as usize, app_icon.height as usize],
-                    &app_icon.rgba,
+                    &rgba,
                 ),
                 egui::TextureOptions::LINEAR,
             );
-            let settings = Settings::load();
+            let stripes = stripes_texture(&cc.egui_ctx, &palette);
             let cache = CatalogCache::load();
             let catalogs = std::array::from_fn(|index| {
                 let game = Game::ALL[index];
@@ -365,6 +377,13 @@ fn main() -> anyhow::Result<()> {
             });
             let source_editor = settings.source(settings.selected_game).to_owned();
             let (catalog_sender, catalog_receiver) = mpsc::channel();
+            let (game_sender, game_receiver) = mpsc::channel();
+            let (closed_sender, closed_receiver) = mpsc::channel();
+            let quper = quper_ui::QuperUi::new(&settings);
+            browsers::set_preferences(
+                settings.download_browser.clone(),
+                settings.browser_downloads.clone(),
+            );
             let mut launcher = Launcher {
                 runtime: Some(runtime),
                 settings,
@@ -372,18 +391,33 @@ fn main() -> anyhow::Result<()> {
                 cancel: CancellationToken::new(),
                 close_when_idle: false,
                 note: None,
-                game_search: None,
+                searching: [false; 2],
+                search_generation: [0; 2],
+                game_sender,
+                game_receiver,
+                closed: [None, None],
+                closed_checking: false,
+                closed_sender,
+                closed_receiver,
+                next_closed_check: Instant::now(),
                 cache,
                 catalogs,
                 catalog_sender,
                 catalog_receiver,
                 source_editor,
                 logo,
-                maps: quper_ui::QuperUi::new(&Settings::load()),
-                maps_open: false,
+                stripes,
+                palette,
+                quper,
+                page: Page::Dlc,
+                stage: 0,
+                installed_browsers: browsers::detect(),
+                default_browser: browsers::system_default(),
+                #[cfg(debug_assertions)]
+                script: ui_script::Script::from_env(),
             };
-            launcher.search_game(&cc.egui_ctx, true);
             for game in Game::ALL {
+                launcher.search_game(&cc.egui_ctx, game, true);
                 launcher.refresh_catalog(&cc.egui_ctx, game, true);
             }
             Ok(Box::new(launcher))
@@ -438,6 +472,12 @@ fn quper_cli(args: &[String]) -> anyhow::Result<()> {
         anyhow::ensure!(args.len() == 4, "--quper-plan <combo-id> <report.json>");
         return ets_launcher::maps::write_json(std::path::Path::new(&args[3]), &plan);
     }
+    if args[1] == "--quper-size" {
+        anyhow::ensure!(args.len() == 4, "--quper-size <combo-id> <report.json>");
+        let estimate =
+            runtime.block_on(quper::size::estimate(&plan, Default::default(), &cancel))?;
+        return ets_launcher::maps::write_json(std::path::Path::new(&args[3]), &estimate);
+    }
     anyhow::ensure!(
         args.len() == 5,
         "--quper-download <combo-id> <library-folder> <report.json>"
@@ -454,57 +494,61 @@ fn quper_cli(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn configure(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = BG;
-    visuals.window_fill = PANEL;
-    visuals.override_text_color = Some(Color32::from_rgb(231, 237, 242));
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(31, 41, 52);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 60, 73);
-    visuals.selection.bg_fill = Color32::from_rgb(43, 100, 77);
-    visuals.hyperlink_color = GREEN;
-    ctx.set_visuals(visuals);
-    ctx.style_mut(|style| {
-        style.spacing.item_spacing = Vec2::new(10.0, 10.0);
-        style.spacing.button_padding = Vec2::new(16.0, 11.0);
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, FontId::proportional(15.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, FontId::proportional(15.0));
-    });
-    // Use the platform's Cyrillic font when available; built-in fonts remain a fallback.
-    if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts
-            .font_data
-            .insert("segoe".into(), egui::FontData::from_owned(bytes).into());
-        fonts
-            .families
-            .get_mut(&egui::FontFamily::Proportional)
-            .unwrap()
-            .insert(0, "segoe".into());
-        ctx.set_fonts(fonts);
-    }
+fn stripes_texture(ctx: &egui::Context, palette: &Palette) -> egui::TextureHandle {
+    ctx.load_texture(
+        "placeholder-stripes",
+        ui::stripe_tile(palette),
+        egui::TextureOptions {
+            wrap_mode: egui::TextureWrapMode::Repeat,
+            ..egui::TextureOptions::NEAREST
+        },
+    )
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Dlc,
+    Quper,
+    Settings,
+}
+
+type GameSearch = (Game, u64, Option<PathBuf>);
 
 struct Launcher {
     logo: egui::TextureHandle,
+    stripes: egui::TextureHandle,
+    palette: Palette,
     runtime: Option<Runtime>,
     settings: Settings,
     state: SharedTransfer,
     cancel: CancellationToken,
     close_when_idle: bool,
     note: Option<String>,
-    game_search: Option<mpsc::Receiver<(Game, Option<PathBuf>)>>,
+    searching: [bool; 2],
+    search_generation: [u64; 2],
+    game_sender: mpsc::Sender<GameSearch>,
+    game_receiver: mpsc::Receiver<GameSearch>,
+    /// Result of the last "is the game running" check per game.
+    closed: [Option<Result<(), String>>; 2],
+    closed_checking: bool,
+    closed_sender: mpsc::Sender<(Game, Result<(), String>)>,
+    closed_receiver: mpsc::Receiver<(Game, Result<(), String>)>,
+    next_closed_check: Instant,
     cache: CatalogCache,
     catalogs: [CatalogState; 2],
     catalog_sender: mpsc::Sender<CatalogUpdate>,
     catalog_receiver: mpsc::Receiver<CatalogUpdate>,
     source_editor: String,
-    maps: quper_ui::QuperUi,
-    maps_open: bool,
+    quper: quper_ui::QuperUi,
+    page: Page,
+    /// Last installation stage reached, kept to show where an error happened.
+    stage: usize,
+    /// Browsers registered in Windows, for the download settings.
+    installed_browsers: Vec<browsers::Installed>,
+    /// The browser Windows opens links with, when no other is chosen.
+    default_browser: Option<PathBuf>,
+    #[cfg(debug_assertions)]
+    script: Option<ui_script::Script>,
 }
 
 struct CatalogUpdate {
@@ -512,6 +556,17 @@ struct CatalogUpdate {
     source: String,
     generation: u64,
     result: Result<playground::Catalog, String>,
+}
+
+fn stage_of(status: &Status) -> Option<usize> {
+    match status {
+        Status::Connecting => Some(0),
+        Status::Downloading => Some(1),
+        Status::Extracting => Some(2),
+        Status::Installing | Status::RollingBack => Some(3),
+        Status::Complete => Some(4),
+        _ => None,
+    }
 }
 
 impl Launcher {
@@ -581,10 +636,11 @@ impl Launcher {
         }
     }
 
-    fn search_game(&mut self, ctx: &egui::Context, use_saved: bool) {
-        let (sender, receiver) = mpsc::channel();
-        self.game_search = Some(receiver);
-        let game = self.settings.selected_game;
+    fn search_game(&mut self, ctx: &egui::Context, game: Game, use_saved: bool) {
+        let index = game.index();
+        self.search_generation[index] += 1;
+        self.searching[index] = true;
+        let generation = self.search_generation[index];
         let saved = if use_saved {
             self.settings
                 .directory(game)
@@ -592,27 +648,105 @@ impl Launcher {
         } else {
             None
         };
-        let ctx = ctx.clone();
+        let (sender, ctx) = (self.game_sender.clone(), ctx.clone());
         self.runtime.as_ref().unwrap().spawn_blocking(move || {
-            let _ = sender.send((game, game::detect(game, saved.as_deref())));
+            let _ = sender.send((game, generation, game::detect(game, saved.as_deref())));
             ctx.request_repaint();
         });
     }
 
     fn poll_game_search(&mut self) {
-        match self.game_search.as_ref().map(|rx| rx.try_recv()) {
-            Some(Ok((game, path))) => {
-                self.game_search = None;
-                self.settings.set_directory(game, path);
-                if let Err(error) = self.settings.save() {
-                    self.note = Some(error.to_string());
-                }
+        while let Ok((game, generation, path)) = self.game_receiver.try_recv() {
+            if generation != self.search_generation[game.index()] {
+                continue;
             }
-            Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                self.game_search = None;
-                self.note = Some("Выберите папку игры вручную в настройках.".into());
+            self.searching[game.index()] = false;
+            self.settings.set_directory(game, path);
+            if let Err(error) = self.settings.save() {
+                self.note = Some(error.to_string());
             }
-            _ => {}
+        }
+    }
+
+    fn pick_game_folder(&mut self, game: Game) {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title(format!("Папка {}", game.name()))
+            .pick_folder()
+        else {
+            return;
+        };
+        if game::is_installation(game, &folder) {
+            // A manual choice wins over a search that is still running.
+            self.search_generation[game.index()] += 1;
+            self.searching[game.index()] = false;
+            self.settings.set_directory(game, Some(folder));
+            self.note = self.settings.save().err().map(|e| e.to_string());
+        } else {
+            self.note = Some(format!(
+                "В папке не найден bin/win_x64/{}.",
+                game.executable()
+            ));
+        }
+    }
+
+    fn check_closed(&mut self, ctx: &egui::Context) {
+        if self.closed_checking || Instant::now() < self.next_closed_check {
+            return;
+        }
+        self.closed_checking = true;
+        let game = self.settings.selected_game;
+        let (sender, ctx) = (self.closed_sender.clone(), ctx.clone());
+        self.runtime.as_ref().unwrap().spawn_blocking(move || {
+            let result = install::ensure_game_closed(game).map_err(|e| format!("{e:#}"));
+            let _ = sender.send((game, result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_closed(&mut self) {
+        while let Ok((game, result)) = self.closed_receiver.try_recv() {
+            self.closed_checking = false;
+            self.closed[game.index()] = Some(result);
+            self.next_closed_check = Instant::now() + Duration::from_secs(4);
+        }
+    }
+
+    fn select_game(&mut self, ctx: &egui::Context, game: Game) {
+        if self.settings.selected_game == game {
+            return;
+        }
+        self.settings.selected_game = game;
+        self.note = None;
+        self.source_editor = self.settings.source(game).to_owned();
+        download::set_state(&self.state, |s| *s = Transfer::default());
+        self.stage = 0;
+        self.next_closed_check = Instant::now();
+        if self.settings.directory(game).is_none() && !self.searching[game.index()] {
+            self.search_game(ctx, game, true);
+        }
+        if let Err(error) = self.settings.save() {
+            self.note = Some(error.to_string());
+        }
+    }
+
+    fn set_theme(&mut self, ctx: &egui::Context, theme: Theme) {
+        if self.settings.theme == theme {
+            return;
+        }
+        self.settings.theme = theme;
+        self.palette = ui::palette(theme);
+        ui::apply_theme(ctx, &self.palette);
+        self.stripes = stripes_texture(ctx, &self.palette);
+        if let Err(error) = self.settings.save() {
+            self.note = Some(error.to_string());
+        }
+    }
+
+    fn effective_channel(&self, game: Game) -> Channel {
+        let preferred = self.settings.channel();
+        match &self.catalogs[game.index()].catalog {
+            Some(catalog) => catalog.effective_channel(preferred),
+            None => preferred,
         }
     }
 
@@ -633,6 +767,7 @@ impl Launcher {
             return;
         };
         self.note = None;
+        self.stage = 0;
         self.cancel = CancellationToken::new();
         download::set_state(&self.state, |s| {
             *s = Transfer {
@@ -647,7 +782,7 @@ impl Launcher {
         }
         self.runtime.as_ref().unwrap().spawn(install::run(
             game,
-            self.settings.channel(),
+            self.effective_channel(game),
             self.settings.source(game).to_owned(),
             self.settings.download_directory(game),
             directory,
@@ -655,31 +790,1427 @@ impl Launcher {
             self.cancel.clone(),
         ));
     }
+
+    fn game_status(&self, game: Game) -> &'static str {
+        if self.searching[game.index()] && self.settings.directory(game).is_none() {
+            "Поиск папки…"
+        } else if self.settings.directory(game).is_some() {
+            "Папка найдена"
+        } else {
+            "Папка не найдена"
+        }
+    }
+
+    // ───────────────────────── Sidebar ─────────────────────────
+
+    fn sidebar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, locked: bool) {
+        let p = self.palette;
+        // Theme and source stick to the bottom of the sidebar.
+        egui::TopBottomPanel::bottom("navigation-footer")
+            .frame(egui::Frame::new())
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 16.0;
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(ui::overline("ТЕМА", &p));
+                    });
+                    if let Some(theme) = self.theme_picker(ui) {
+                        self.set_theme(ctx, theme);
+                    }
+                });
+                egui::Frame::new()
+                    .fill(p.panel)
+                    .stroke(Stroke::new(1.0_f32, p.line_soft))
+                    .corner_radius(12)
+                    .inner_margin(14)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        ui.label(ui::overline("ИСТОЧНИК", &p));
+                        let (label, url, caption) = if self.page == Page::Quper {
+                            (
+                                "Quper Simulator",
+                                ets_launcher::quper::SITE.to_owned(),
+                                "Готовые сборки модов",
+                            )
+                        } else {
+                            (
+                                "PlayGround",
+                                self.settings.source(self.settings.selected_game).to_owned(),
+                                "Rust · встроенный BitTorrent",
+                            )
+                        };
+                        if ui::link(ui, &p, label, 13.0, W::Semi, true).clicked()
+                            && let Err(error) = open::that(url)
+                        {
+                            self.note = Some(error.to_string());
+                        }
+                        ui.label(ui::text(caption, 11.0, W::Regular, p.muted));
+                    });
+            });
+        ui.spacing_mut().item_spacing.y = 24.0;
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.add(
+                egui::Image::new(&self.logo)
+                    .fit_to_exact_size(Vec2::splat(40.0))
+                    .corner_radius(10),
+            );
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add_space(1.0);
+                ui.label(ui::text("TRUCK", 17.0, W::Extra, p.accent));
+                ui.label(ui::text("LAUNCHER", 12.0, W::Bold, p.muted));
+            });
+        });
+
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(ui::overline("ИГРА", &p));
+            });
+            ui.add_space(2.0);
+            for game in Game::ALL {
+                let selected = self.settings.selected_game == game;
+                let enabled = selected || !locked;
+                let response = self.game_option(ui, game, selected, enabled);
+                if response.clicked() {
+                    self.select_game(ctx, game);
+                }
+                if !enabled {
+                    response.on_hover_text("Дождитесь завершения текущей операции");
+                }
+            }
+        });
+
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(ui::overline("РАЗДЕЛЫ", &p));
+            });
+            ui.add_space(4.0);
+            for (page, icon, label) in [
+                (Page::Dlc, Icon::Download, "DLC карт"),
+                (Page::Quper, Icon::Layers, "Сборки Quper"),
+                (Page::Settings, Icon::Sliders, "Настройки"),
+            ] {
+                if self.nav_item(ui, icon, label, self.page == page).clicked() {
+                    self.page = page;
+                }
+            }
+        });
+    }
+
+    fn game_option(
+        &self,
+        ui: &mut egui::Ui,
+        game: Game,
+        selected: bool,
+        enabled: bool,
+    ) -> egui::Response {
+        let p = self.palette;
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), 54.0),
+            if enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
+        let hovered = enabled && response.hovered() && !selected;
+        let (fill, border) = if selected {
+            (p.accent_sel, p.accent_border)
+        } else if hovered {
+            (p.raised, Color32::TRANSPARENT)
+        } else {
+            (Color32::TRANSPARENT, Color32::TRANSPARENT)
+        };
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            10,
+            fill,
+            Stroke::new(1.0_f32, border),
+            StrokeKind::Inside,
+        );
+        let badge = Rect::from_min_size(
+            pos2(rect.min.x + 12.0, rect.center().y - 14.0),
+            vec2(36.0, 28.0),
+        );
+        painter.rect_filled(badge, 6, if selected { p.accent } else { p.line_soft });
+        ui::paint_text(
+            ui,
+            badge,
+            game.short_name(),
+            ui::font(11.0, W::Extra),
+            if selected { p.on_accent } else { p.text3 },
+        );
+        let x = badge.max.x + 12.0;
+        let name = match game {
+            Game::Ets2 => "Euro Truck Sim 2",
+            Game::Ats => "American Truck Sim",
+        };
+        painter.text(
+            pos2(x, rect.center().y - 9.0),
+            egui::Align2::LEFT_CENTER,
+            name,
+            ui::font(13.0, if selected { W::Bold } else { W::Semi }),
+            if selected {
+                p.text
+            } else if enabled {
+                p.text2
+            } else {
+                p.muted
+            },
+        );
+        painter.text(
+            pos2(x, rect.center().y + 9.0),
+            egui::Align2::LEFT_CENTER,
+            self.game_status(game),
+            ui::font(11.0, W::Regular),
+            p.muted,
+        );
+        if enabled && !selected {
+            response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            response
+        }
+    }
+
+    fn nav_item(&self, ui: &mut egui::Ui, icon: Icon, label: &str, active: bool) -> egui::Response {
+        let p = self.palette;
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+        if active || response.hovered() {
+            ui.painter().rect_filled(rect, 10, p.raised);
+        }
+        let color = if active { p.text } else { p.text3 };
+        ui::paint_icon(
+            ui.painter(),
+            Rect::from_center_size(pos2(rect.min.x + 21.0, rect.center().y), Vec2::splat(18.0)),
+            icon,
+            if active { p.accent } else { color },
+            2.0,
+        );
+        ui.painter().text(
+            pos2(rect.min.x + 42.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            ui::font(14.0, if active { W::Bold } else { W::Semi }),
+            color,
+        );
+        if active {
+            ui.painter()
+                .circle_filled(pos2(rect.max.x - 16.0, rect.center().y), 4.0, p.accent);
+        }
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
+
+    fn theme_picker(&self, ui: &mut egui::Ui) -> Option<Theme> {
+        let p = self.palette;
+        let mut picked = None;
+        egui::Frame::new()
+            .fill(p.inset)
+            .stroke(Stroke::new(1.0_f32, p.line_soft))
+            .corner_radius(12)
+            .inner_margin(4)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.horizontal(|ui| {
+                    let width = (ui.available_width() - 4.0) / 2.0;
+                    for (theme, label, swatch) in [
+                        (Theme::Black, "Чёрная", Color32::BLACK),
+                        (Theme::Light, "Светлая", Color32::from_rgb(0xF3, 0xE9, 0xDC)),
+                    ] {
+                        let active = self.settings.theme == theme;
+                        let (rect, response) =
+                            ui.allocate_exact_size(vec2(width, 48.0), Sense::click());
+                        if active || response.hovered() {
+                            ui.painter().rect_filled(
+                                rect,
+                                9,
+                                if active { p.raised } else { p.hover },
+                            );
+                        }
+                        let center = rect.center();
+                        ui.painter().circle(
+                            pos2(center.x, center.y - 8.0),
+                            5.0,
+                            swatch,
+                            Stroke::new(1.0_f32, p.line_strong),
+                        );
+                        ui.painter().text(
+                            pos2(center.x, center.y + 9.0),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            ui::font(11.0, if active { W::Extra } else { W::Semi }),
+                            if active { p.text } else { p.text3 },
+                        );
+                        if response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            picked = Some(theme);
+                        }
+                    }
+                });
+            });
+        picked
+    }
+
+    // ───────────────────────── DLC page ─────────────────────────
+
+    fn dlc_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        transfer: &Transfer,
+        busy: bool,
+    ) {
+        let p = self.palette;
+        let game = self.settings.selected_game;
+        let state = &self.catalogs[game.index()];
+        let (catalog, refreshing, catalog_error) =
+            (state.catalog.clone(), state.refreshing, state.error.clone());
+
+        ui.horizontal(|ui| {
+            ui::page_title(ui, &p, game.name(), "DLC карт");
+            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
+                // The group sits on the title baseline; its items are centred on each other.
+                ui.horizontal(|ui| {
+                    if ui::icon_button(ui, &p, Icon::Refresh, 44.0, !busy && !refreshing)
+                        .on_hover_text("Обновить данные источника")
+                        .clicked()
+                    {
+                        self.refresh_catalog(ctx, game, true);
+                    }
+                    if refreshing {
+                        ui.label(ui::text("Проверяем источник…", 12.0, W::Regular, p.muted));
+                        ui.add(egui::Spinner::new().size(14.0).color(p.accent));
+                    } else {
+                        let stamp = catalog
+                            .as_ref()
+                            .map(|c| format!("Данные проверены {}", ui::ago(c.checked_at)))
+                            .unwrap_or_else(|| "Нет сохранённых данных".into());
+                        ui.label(ui::text(stamp, 12.0, W::Regular, p.muted));
+                        ui::dot(
+                            ui,
+                            if catalog_error.is_some() {
+                                p.warn
+                            } else {
+                                p.accent
+                            },
+                            None,
+                        );
+                    }
+                });
+            });
+        });
+
+        if let Some(error) = &catalog_error {
+            ui::banner(
+                ui,
+                &p,
+                ui::Tone::Warn,
+                &format!(
+                    "Не удалось обновить данные PlayGround: {error}{}",
+                    if catalog.is_some() {
+                        ". Показаны сохранённые данные; перед установкой источник будет проверен заново."
+                    } else {
+                        ""
+                    }
+                ),
+                None,
+            );
+        }
+        if let Some(note) = self.note.clone()
+            && ui::banner(ui, &p, ui::Tone::Warn, &note, Some("Скрыть"))
+        {
+            self.note = None;
+        }
+
+        let channel = self.effective_channel(game);
+        let release = catalog
+            .as_ref()
+            .and_then(|c| c.select(channel).ok())
+            .cloned();
+        ui::card(&p).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let wide = ui.available_width() >= 640.0;
+            let left = if wide {
+                (ui.available_width() - 24.0) * 0.56
+            } else {
+                ui.available_width()
+            };
+            let layout = if wide {
+                Layout::left_to_right(Align::Min)
+            } else {
+                Layout::top_down(Align::Min)
+            };
+            ui.with_layout(layout, |ui| {
+                ui.spacing_mut().item_spacing = vec2(24.0, 24.0);
+                ui.allocate_ui_with_layout(vec2(left, 0.0), Layout::top_down(Align::Min), |ui| {
+                    self.release_info(ui, catalog.as_ref(), release.as_ref(), refreshing, busy);
+                });
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), 0.0),
+                    Layout::top_down(Align::Min),
+                    |ui| self.install_panel(ui, release.is_some(), busy),
+                );
+            });
+        });
+
+        if transfer.status != Status::Ready || self.close_when_idle {
+            self.progress_card(ui, transfer, busy);
+        }
+        ui.label(ui::text(
+            "При закрытии окна лаунчер сначала остановит загрузку и вернёт оригинальные файлы.",
+            12.0,
+            W::Regular,
+            p.muted,
+        ));
+    }
+
+    fn release_info(
+        &mut self,
+        ui: &mut egui::Ui,
+        catalog: Option<&playground::Catalog>,
+        release: Option<&playground::Release>,
+        refreshing: bool,
+        busy: bool,
+    ) {
+        let p = self.palette;
+        let game = self.settings.selected_game;
+        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.label(ui::text("ВЕРСИЯ НА ИСТОЧНИКЕ", 12.0, W::Bold, p.muted));
+        match release {
+            Some(release) => {
+                ui.label(ui::mono_text(
+                    release.version.as_deref().unwrap_or("не указана"),
+                    40.0,
+                    true,
+                    p.accent,
+                ));
+                ui.add(
+                    egui::Label::new(ui::mono_text(
+                        format!(
+                            "{} · {}",
+                            release.file.name,
+                            release
+                                .size_label
+                                .as_deref()
+                                .unwrap_or("размер уточнится при загрузке")
+                        ),
+                        13.0,
+                        false,
+                        p.muted,
+                    ))
+                    .wrap(),
+                );
+            }
+            None => {
+                ui.label(ui::mono_text("—", 40.0, true, p.muted));
+                ui.add(
+                    egui::Label::new(ui::text(
+                        if refreshing {
+                            "Проверяем актуальные файлы PlayGround…"
+                        } else {
+                            "Для выбранной ветки нет доступного архива"
+                        },
+                        13.0,
+                        W::Regular,
+                        p.muted,
+                    ))
+                    .wrap(),
+                );
+            }
+        }
+        ui.add_space(14.0);
+        ui.spacing_mut().item_spacing.y = 8.0;
+        ui.label(ui::text("Ветка игры в Steam", 13.0, W::Semi, p.text2));
+        let channels = [(Channel::Stable, "Обычная"), (Channel::Beta, "Beta")];
+        let segments = channels
+            .iter()
+            .map(|&(value, label)| {
+                let release = catalog.and_then(|c| c.select(value).ok());
+                ui::Segment {
+                    label,
+                    extra: Some(match release.and_then(|r| r.version.clone()) {
+                        Some(version) => (version, true, p.accent),
+                        None if release.is_some() => ("доступна".into(), false, p.muted),
+                        None => ("недоступна".into(), false, p.muted),
+                    }),
+                    enabled: release.is_some() && !busy,
+                }
+            })
+            .collect::<Vec<_>>();
+        let selected = channels
+            .iter()
+            .position(|(c, _)| *c == self.effective_channel(game))
+            .unwrap_or(0);
+        if let Some(index) = ui::segmented(ui, &p, selected, &segments, 40.0, 14.0, p.bg, 12)
+            && index != selected
+        {
+            self.settings.set_channel(game, channels[index].0);
+            self.note = None;
+            download::set_state(&self.state, |s| *s = Transfer::default());
+            if let Err(error) = self.settings.save() {
+                self.note = Some(error.to_string());
+            }
+        }
+        ui.label(ui::text(
+            "Выберите ту же ветку, что установлена в Steam.",
+            12.0,
+            W::Regular,
+            p.muted,
+        ));
+    }
+
+    fn install_panel(&mut self, ui: &mut egui::Ui, has_release: bool, busy: bool) {
+        let p = self.palette;
+        let game = self.settings.selected_game;
+        let directory = self
+            .settings
+            .directory(game)
+            .map(|d| d.display().to_string());
+        let searching = self.searching[game.index()];
+        ui::inset(&p).inner_margin(20).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+            let row = |ui: &mut egui::Ui,
+                       icon: Option<(Icon, Color32)>,
+                       title: &str,
+                       detail: Option<&str>| {
+                ui.horizontal_top(|ui| {
+                    match icon {
+                        Some((icon, color)) => {
+                            ui::icon(ui, icon, 16.0, color, 2.4);
+                        }
+                        None => {
+                            ui.add(egui::Spinner::new().size(16.0).color(p.accent));
+                        }
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.add(egui::Label::new(ui::text(title, 13.0, W::Regular, p.text2)).wrap());
+                        if let Some(detail) = detail {
+                            ui.add(
+                                egui::Label::new(ui::mono_text(detail, 11.0, false, p.muted))
+                                    .wrap(),
+                            );
+                        }
+                    });
+                });
+            };
+            match &self.closed[game.index()] {
+                Some(Ok(())) => row(ui, Some((Icon::Check, p.ok)), "Игра закрыта", None),
+                Some(Err(message)) => row(ui, Some((Icon::Warning, p.warn)), message, None),
+                None => row(ui, None, "Проверяем, закрыта ли игра…", None),
+            }
+            match (&directory, searching) {
+                (Some(path), _) => row(
+                    ui,
+                    Some((Icon::Check, p.ok)),
+                    "Папка игры найдена",
+                    Some(path),
+                ),
+                (None, true) => row(ui, None, "Ищем папку игры…", None),
+                (None, false) => {
+                    row(
+                        ui,
+                        Some((Icon::Warning, p.warn)),
+                        "Папка игры не найдена",
+                        None,
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_space(26.0);
+                        if ui::link(ui, &p, "Указать в настройках", 12.0, W::Semi, false).clicked()
+                        {
+                            self.page = Page::Settings;
+                        }
+                    });
+                }
+            }
+            row(
+                ui,
+                Some((Icon::Shield, p.accent)),
+                "Оригиналы сохраняются в резервную копию",
+                None,
+            );
+            ui.add_space(4.0);
+            let ready = has_release && directory.is_some() && !searching;
+            let response = Button::new(
+                if busy {
+                    "Идёт установка…"
+                } else {
+                    "Установить DLC"
+                },
+                Kind::Primary,
+            )
+            .icon(Icon::Download)
+            .height(52.0)
+            .size(16.0)
+            .radius(12)
+            .full_width()
+            .enabled(!busy && ready)
+            .show(ui, &p);
+            if response.clicked() {
+                self.start_install();
+            } else if !busy && !ready {
+                response.on_hover_text(if directory.is_none() {
+                    "Укажите папку игры в настройках"
+                } else if !has_release {
+                    "Нет архива для выбранной ветки — обновите данные источника"
+                } else {
+                    "Идёт поиск папки игры"
+                });
+            }
+        });
+    }
+
+    fn progress_card(&mut self, ui: &mut egui::Ui, transfer: &Transfer, busy: bool) {
+        let p = self.palette;
+        let heading = match transfer.status {
+            Status::Ready => "Готов к установке",
+            Status::Connecting => "Подготовка загрузки",
+            Status::Downloading => "Скачивание архива",
+            Status::Extracting => "Распаковка архива",
+            Status::Installing => "Установка файлов",
+            Status::RollingBack => "Восстановление файлов",
+            Status::Complete => "DLC установлены",
+            Status::Cancelled => "Установка остановлена",
+            Status::Error => "Не удалось установить DLC",
+        };
+        let subtitle = if self.close_when_idle {
+            "Завершаем остановку и восстановление файлов перед закрытием…".to_owned()
+        } else if transfer.status == Status::Downloading {
+            "Части проверяются по хешам — после перезапуска загрузка продолжится".to_owned()
+        } else {
+            transfer.message.clone()
+        };
+        ui::card(&p).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 20.0;
+            let stop = Button::new("Остановить", Kind::Danger)
+                .icon(Icon::Stop)
+                .pad(18.0)
+                .enabled(!self.cancel.is_cancelled());
+            let open_folder = Button::new("Открыть папку игры", Kind::Ghost).icon(Icon::Folder);
+            let can_stop = busy && transfer.status != Status::RollingBack;
+            let can_open = !busy && transfer.status == Status::Complete;
+            let actions = if can_stop {
+                stop.width(ui)
+            } else if can_open {
+                open_folder.width(ui)
+            } else {
+                0.0
+            };
+            ui::split_row(
+                ui,
+                actions,
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.horizontal(|ui| {
+                        if busy {
+                            ui.add(egui::Spinner::new().size(16.0).color(p.accent));
+                        }
+                        let color = match transfer.status {
+                            Status::Complete => p.ok,
+                            Status::Error => p.danger_text,
+                            _ => p.text,
+                        };
+                        ui.label(ui::text(heading, 20.0, W::Extra, color));
+                    });
+                    ui.add(
+                        egui::Label::new(ui::text(
+                            &subtitle,
+                            13.0,
+                            W::Regular,
+                            if transfer.status == Status::Error {
+                                p.danger_text
+                            } else {
+                                p.muted
+                            },
+                        ))
+                        .wrap(),
+                    );
+                },
+                |ui| {
+                    if can_stop {
+                        if stop.show(ui, &p).clicked() {
+                            self.cancel.cancel();
+                        }
+                    } else if can_open
+                        && open_folder.show(ui, &p).clicked()
+                        && let Some(path) = &transfer.saved_to
+                        && let Err(error) = open::that(path)
+                    {
+                        self.note = Some(error.to_string());
+                    }
+                },
+            );
+
+            // Stage strip: Торрент → Загрузка → Распаковка → Установка.
+            let current = stage_of(&transfer.status).unwrap_or(self.stage);
+            let failed = matches!(transfer.status, Status::Error | Status::Cancelled);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.columns(4, |columns| {
+                for (index, (column, label)) in columns
+                    .iter_mut()
+                    .zip(["Торрент", "Загрузка", "Распаковка", "Установка"])
+                    .enumerate()
+                {
+                    column.spacing_mut().item_spacing.y = 8.0;
+                    let (bar, _) = column
+                        .allocate_exact_size(vec2(column.available_width(), 4.0), Sense::hover());
+                    let done = index < current;
+                    let active = index == current && !failed;
+                    column
+                        .painter()
+                        .rect_filled(bar, 2, if done { p.accent } else { p.line });
+                    if active {
+                        let fraction = if index == 1 || index == 3 {
+                            transfer.progress().max(0.04)
+                        } else {
+                            0.5
+                        };
+                        column.painter().rect_filled(
+                            Rect::from_min_size(bar.min, vec2(bar.width() * fraction, 4.0)),
+                            2,
+                            p.accent,
+                        );
+                    }
+                    column.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if done {
+                            ui::icon(ui, Icon::Check, 14.0, p.ok, 3.0);
+                            ui.label(ui::text(label, 13.0, W::Bold, p.text2));
+                        } else if index == current && failed {
+                            ui::dot(ui, p.danger_text, None);
+                            ui.label(ui::text(label, 13.0, W::Extra, p.danger_text));
+                        } else if active {
+                            ui::dot(ui, p.accent, Some(p.accent_glow));
+                            ui.label(ui::text(label, 13.0, W::Extra, p.text));
+                        } else {
+                            ui.label(ui::text(label, 13.0, W::Semi, p.muted));
+                        }
+                    });
+                }
+            });
+
+            let measurable = transfer.total.is_some()
+                && matches!(
+                    transfer.status,
+                    Status::Downloading | Status::Installing | Status::Complete
+                );
+            if measurable {
+                let fraction = if transfer.status == Status::Complete {
+                    1.0
+                } else {
+                    transfer.progress()
+                };
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 10.0;
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(ui::mono_text(
+                            format!("{}", (fraction * 100.0).floor() as u32),
+                            36.0,
+                            true,
+                            p.text,
+                        ));
+                        ui.label(ui::mono_text("%", 20.0, true, p.muted));
+                        if transfer.status == Status::Downloading
+                            && let Some(total) = transfer.total
+                        {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let left = total.saturating_sub(transfer.downloaded);
+                                let eta = match left.checked_div(transfer.speed) {
+                                    None => "оценка времени…".to_owned(),
+                                    Some(seconds) if seconds < 60 => "осталось < 1 мин".into(),
+                                    Some(seconds) => {
+                                        format!("осталось ≈ {} мин", seconds.div_ceil(60))
+                                    }
+                                };
+                                ui.label(ui::text(eta, 13.0, W::Regular, p.muted));
+                            });
+                        }
+                    });
+                    ui::progress(ui, &p, fraction, 12.0, p.accent);
+                });
+            }
+            if transfer.status == Status::Downloading {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                let total = transfer
+                    .total
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "…".into());
+                let stats = [
+                    (
+                        "Скачано",
+                        format!("{} / {total}", format_bytes(transfer.downloaded)),
+                    ),
+                    ("Скорость", format!("{}/с", format_bytes(transfer.speed))),
+                    ("Пиры", transfer.peers.to_string()),
+                ];
+                ui.columns(3, |columns| {
+                    for (column, (label, value)) in columns.iter_mut().zip(stats) {
+                        ui::inset(&p)
+                            .inner_margin(Margin::symmetric(16, 14))
+                            .show(column, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 4.0;
+                                ui.label(ui::text(label, 12.0, W::Regular, p.muted));
+                                ui.label(ui::mono_text(value, 16.0, true, p.text));
+                            });
+                    }
+                });
+            }
+        });
+    }
+
+    // ───────────────────────── Settings page ─────────────────────────
+
+    fn settings_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, busy: bool) {
+        let p = self.palette;
+        let game = self.settings.selected_game;
+        ui::page_title(
+            ui,
+            &p,
+            &format!("{} · пути ETS2 и ATS хранятся отдельно", game.name()),
+            "Настройки",
+        );
+        if let Some(note) = self.note.clone()
+            && ui::banner(ui, &p, ui::Tone::Warn, &note, Some("Скрыть"))
+        {
+            self.note = None;
+        }
+        if busy {
+            ui::banner(
+                ui,
+                &p,
+                ui::Tone::Info,
+                "Настройки станут доступны после завершения текущей загрузки или установки.",
+                None,
+            );
+        }
+        egui::Frame::new()
+            .fill(p.panel)
+            .stroke(Stroke::new(1.0_f32, p.line))
+            .corner_radius(16)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let enabled = !busy;
+
+                // Game folder.
+                let searching = self.searching[game.index()];
+                let directory = self
+                    .settings
+                    .directory(game)
+                    .map(|d| d.display().to_string());
+                let mut search = false;
+                let mut pick = false;
+                let find = Button::new("Найти автоматически", Kind::Ghost)
+                    .height(40.0)
+                    .size(13.0)
+                    .pad(14.0)
+                    .enabled(enabled && !searching);
+                let choose = Button::new("Выбрать…", Kind::Raised)
+                    .height(40.0)
+                    .size(13.0)
+                    .pad(14.0)
+                    .enabled(enabled);
+                let actions = find.width(ui) + choose.width(ui) + 8.0;
+                settings_row(ui, &p, true, |ui| {
+                    ui::split_row(
+                        ui,
+                        actions,
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            ui.label(ui::text("Папка игры", 15.0, W::Bold, p.text));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                if searching {
+                                    ui.add(egui::Spinner::new().size(14.0).color(p.accent));
+                                    ui.label(ui::text(
+                                        "Ищем установку в Steam…",
+                                        12.0,
+                                        W::Bold,
+                                        p.muted,
+                                    ));
+                                } else if directory.is_some() {
+                                    ui::icon(ui, Icon::Check, 14.0, p.ok, 3.0);
+                                    ui.label(ui::text(
+                                        format!("Найден bin/win_x64/{}", game.executable()),
+                                        12.0,
+                                        W::Bold,
+                                        p.ok,
+                                    ));
+                                } else {
+                                    ui::icon(ui, Icon::Warning, 14.0, p.warn, 2.4);
+                                    ui.label(ui::text(
+                                        "Папка не найдена — выберите её вручную",
+                                        12.0,
+                                        W::Bold,
+                                        p.warn,
+                                    ));
+                                }
+                            });
+                            if let Some(path) = &directory {
+                                ui.add(
+                                    egui::Label::new(ui::mono_text(path, 12.0, false, p.text2))
+                                        .wrap(),
+                                );
+                            }
+                        },
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            search = find.show(ui, &p).clicked();
+                            pick = choose.show(ui, &p).clicked();
+                        },
+                    );
+                });
+                if search {
+                    self.search_game(ctx, game, false);
+                }
+                if pick {
+                    self.pick_game_folder(game);
+                }
+
+                // PlayGround source page.
+                let mut apply = false;
+                let mut reset = false;
+                settings_row(ui, &p, true, |ui| {
+                    ui.spacing_mut().item_spacing.y = 10.0;
+                    ui.label(ui::text(
+                        "Страница источника PlayGround",
+                        15.0,
+                        W::Bold,
+                        p.text,
+                    ));
+                    ui.add(
+                        egui::Label::new(ui::text(
+                            "Замените, если автор выпустил новую публикацию. Перенаправления со старого адреса обрабатываются автоматически.",
+                            12.0,
+                            W::Regular,
+                            p.muted,
+                        ))
+                        .wrap(),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let width = (ui.available_width() - 228.0).max(200.0);
+                        ui.add_enabled_ui(enabled, |ui| {
+                            ui::field(
+                                ui,
+                                &p,
+                                &mut self.source_editor,
+                                "https://www.playground.ru/…",
+                                true,
+                                width,
+                                None,
+                                p.bg,
+                            );
+                        });
+                        apply = Button::new("Применить", Kind::Primary)
+                            .size(13.0)
+                            .enabled(enabled)
+                            .show(ui, &p)
+                            .clicked();
+                        reset = Button::new("Сбросить", Kind::Ghost)
+                            .size(13.0)
+                            .pad(14.0)
+                            .enabled(enabled)
+                            .show(ui, &p)
+                            .clicked();
+                    });
+                });
+                if apply {
+                    match self.settings.set_source(game, &self.source_editor) {
+                        Ok(()) => {
+                            self.note = self.settings.save().err().map(|e| e.to_string());
+                            self.source_editor = self.settings.source(game).to_owned();
+                            self.refresh_catalog(ctx, game, true);
+                        }
+                        Err(error) => self.note = Some(error.to_string()),
+                    }
+                }
+                if reset {
+                    let _ = self.settings.set_source(game, "");
+                    self.source_editor = self.settings.source(game).to_owned();
+                    self.note = self.settings.save().err().map(|e| e.to_string());
+                    self.refresh_catalog(ctx, game, true);
+                }
+
+                // Download cache.
+                let cache = self.settings.download_directory(game).display().to_string();
+                if path_row(
+                    ui,
+                    &p,
+                    "Кэш загрузок",
+                    Some("Готовый архив остаётся здесь после установки"),
+                    &cache,
+                    enabled,
+                ) && let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Папка кэша загрузок")
+                    .set_directory(&self.settings.output)
+                    .pick_folder()
+                {
+                    self.settings.output = folder;
+                    self.note = self.settings.save().err().map(|e| e.to_string());
+                }
+
+                // Quper library.
+                let library = quper_ui::QuperUi::root(&self.settings)
+                    .display()
+                    .to_string();
+                if path_row(
+                    ui,
+                    &p,
+                    "Папка сборок Quper",
+                    None,
+                    &library,
+                    enabled && !self.quper.preparing(),
+                ) && let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Папка готовых сборок Quper")
+                    .pick_folder()
+                {
+                    self.settings.quper_library = Some(folder);
+                    self.note = self.settings.save().err().map(|e| e.to_string());
+                    self.quper.library_changed();
+                }
+
+                settings_row(ui, &p, false, |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 14.0;
+                        ui::icon(ui, Icon::Shield, 20.0, p.accent, 2.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.label(ui::text("Резервные копии", 15.0, W::Bold, p.text));
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.label(ui::text(
+                                    "Оригиналы заменяемых файлов сохраняются в ",
+                                    12.0,
+                                    W::Regular,
+                                    p.muted,
+                                ));
+                                ui.label(ui::mono_text(
+                                    ".ets-launcher/backups",
+                                    12.0,
+                                    false,
+                                    p.text2,
+                                ));
+                                ui.label(ui::text(
+                                    " внутри папки игры. При отмене или ошибке они восстанавливаются автоматически.",
+                                    12.0,
+                                    W::Regular,
+                                    p.muted,
+                                ));
+                            });
+                        });
+                    });
+                });
+            });
+        self.browser_settings(ui);
+    }
+
+    /// Browser hand-off for sites whose check does not pass inside the launcher.
+    fn browser_settings(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
+        let chosen = self.settings.download_browser.clone();
+        // The browser that will actually open: the chosen one or the system default.
+        let effective = chosen.clone().or_else(|| self.default_browser.clone());
+        let family = effective
+            .as_deref()
+            .map(browsers::family)
+            .unwrap_or(browsers::Family::Edge);
+        let name_of = |exe: &std::path::Path| {
+            self.installed_browsers
+                .iter()
+                .find(|b| b.exe == exe)
+                .map(|b| b.name.clone())
+                .unwrap_or_else(|| {
+                    exe.file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| exe.display().to_string())
+                })
+        };
+        let default_label = match &self.default_browser {
+            Some(exe) => format!("По умолчанию в Windows — {}", name_of(exe)),
+            None => "Браузер по умолчанию в Windows".to_owned(),
+        };
+        let chosen_name = match &chosen {
+            None => default_label.clone(),
+            Some(exe) => name_of(exe),
+        };
+        let mut changed = false;
+        ui.label(ui::text("Загрузка через браузер", 20.0, W::Extra, p.text));
+        ui.add(
+            egui::Label::new(ui::text(
+                "Для сайтов с проверкой Cloudflare (например, ModsFire) лаунчер открывает файлы в вашем браузере, а скачанное забирает из папки загрузок. Здесь выбирается браузер и готовится Tampermonkey со скриптом, который нажимает кнопки сайта.",
+                13.0,
+                W::Regular,
+                p.muted,
+            ))
+            .wrap(),
+        );
+        egui::Frame::new()
+            .fill(p.panel)
+            .stroke(Stroke::new(1.0_f32, p.line))
+            .corner_radius(16)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+
+                // Browser.
+                settings_row(ui, &p, true, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.label(ui::text("Браузер для загрузок", 15.0, W::Bold, p.text));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        egui::ComboBox::from_id_salt("download-browser")
+                            .width(300.0)
+                            .selected_text(ui::text(&chosen_name, 14.0, W::Semi, p.text))
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(chosen.is_none(), &default_label)
+                                    .clicked()
+                                {
+                                    self.settings.download_browser = None;
+                                    changed = true;
+                                }
+                                for browser in &self.installed_browsers {
+                                    if ui
+                                        .selectable_label(
+                                            chosen.as_ref() == Some(&browser.exe),
+                                            &browser.name,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.settings.download_browser = Some(browser.exe.clone());
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        if Button::new("Другой…", Kind::Ghost)
+                            .height(36.0)
+                            .size(13.0)
+                            .pad(12.0)
+                            .show(ui, &p)
+                            .on_hover_text("Выбрать .exe браузера, которого нет в списке")
+                            .clicked()
+                            && let Some(exe) = rfd::FileDialog::new()
+                                .set_title("Программа браузера")
+                                .add_filter("Программа", &["exe"])
+                                .pick_file()
+                        {
+                            self.settings.download_browser = Some(exe);
+                            changed = true;
+                        }
+                        if Button::new("Обновить список", Kind::Ghost)
+                            .height(36.0)
+                            .size(13.0)
+                            .pad(12.0)
+                            .show(ui, &p)
+                            .clicked()
+                        {
+                            self.installed_browsers = browsers::detect();
+                            self.default_browser = browsers::system_default();
+                        }
+                        if Button::new("Проверить", Kind::Ghost)
+                            .icon(Icon::External)
+                            .height(36.0)
+                            .size(13.0)
+                            .pad(12.0)
+                            .show(ui, &p)
+                            .on_hover_text("Открыть страницу в выбранном браузере")
+                            .clicked()
+                            && let Err(error) = browsers::open_url("https://modsfire.com/")
+                        {
+                            self.note = Some(format!("Не удалось открыть браузер: {error}"));
+                        }
+                    });
+                    let kind = match (effective.is_some(), family) {
+                        (false, _) => "Откроется тот браузер, что выбран в Windows по умолчанию.",
+                        (true, browsers::Family::Firefox) => {
+                            "Firefox-совместимый браузер (Zen, Firefox, LibreWolf, Floorp): Tampermonkey ставится из Firefox Add-ons."
+                        }
+                        (true, browsers::Family::Edge) => {
+                            "Microsoft Edge: Tampermonkey ставится из магазина Edge Add-ons."
+                        }
+                        (true, browsers::Family::Chromium) => {
+                            "Браузер на Chromium: Tampermonkey ставится из Chrome Web Store."
+                        }
+                    };
+                    ui.label(ui::text(kind, 12.0, W::Regular, p.muted));
+                });
+
+                // ModsFire hand-off.
+                settings_row(ui, &p, true, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    if ui
+                        .checkbox(
+                            &mut self.settings.external_downloads,
+                            ui::text(
+                                "Скачивать через этот браузер всё, что лаунчер не может скачать сам",
+                                15.0,
+                                W::Bold,
+                                p.text,
+                            ),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    ui.add(
+                        egui::Label::new(ui::text(
+                            "ModsFire, файлообменники с проверкой Cloudflare, страницы авторов и всё, что не скачалось при «Продолжить загрузку», открываются по очереди в выбранном браузере вместо встроенного; скрипт нажимает кнопки сайта, а лаунчер подключает скачанное к сборке.",
+                            12.0,
+                            W::Regular,
+                            p.muted,
+                        ))
+                        .wrap(),
+                    );
+                });
+
+                // Downloads folder.
+                let folder = browsers::downloads_folder()
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_else(|| "не найдена".into());
+                let mut pick = false;
+                let mut reset = false;
+                let change = Button::new("Изменить…", Kind::Raised)
+                    .height(40.0)
+                    .size(13.0)
+                    .pad(14.0);
+                let default = Button::new("По умолчанию", Kind::Ghost)
+                    .height(40.0)
+                    .size(13.0)
+                    .pad(14.0)
+                    .enabled(self.settings.browser_downloads.is_some());
+                let actions = change.width(ui) + default.width(ui) + 8.0;
+                settings_row(ui, &p, true, |ui| {
+                    ui::split_row(
+                        ui,
+                        actions,
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            ui.label(ui::text("Папка загрузок браузера", 15.0, W::Bold, p.text));
+                            ui.add(
+                                egui::Label::new(ui::text(
+                                    "Отсюда лаунчер забирает скачанные моды. Должна совпадать с папкой в настройках браузера.",
+                                    12.0,
+                                    W::Regular,
+                                    p.muted,
+                                ))
+                                .wrap(),
+                            );
+                            ui.add(
+                                egui::Label::new(ui::mono_text(&folder, 12.0, false, p.text2))
+                                    .wrap(),
+                            );
+                        },
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            pick = change.show(ui, &p).clicked();
+                            reset = default.show(ui, &p).clicked();
+                        },
+                    );
+                });
+                if pick
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_title("Папка загрузок браузера")
+                        .pick_folder()
+                {
+                    self.settings.browser_downloads = Some(path);
+                    changed = true;
+                }
+                if reset {
+                    self.settings.browser_downloads = None;
+                    changed = true;
+                }
+
+                // Tampermonkey.
+                settings_row(ui, &p, false, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.label(ui::text("Подготовка браузера и Tampermonkey", 15.0, W::Bold, p.text));
+                    let mut steps = vec![
+                        "1. Установите расширение Tampermonkey — кнопка ниже откроет его страницу в выбранном браузере.".to_owned(),
+                    ];
+                    match family {
+                        browsers::Family::Firefox => steps.push(
+                            "2. В Zen и Firefox дополнительных разрешений не нужно. Если Tampermonkey спросит доступ к сайтам, разрешите.".into(),
+                        ),
+                        _ => steps.push(
+                            "2. Откройте страницу расширений браузера (chrome://extensions или edge://extensions) → Tampermonkey → «Сведения» и включите «Разрешить пользовательские скрипты». В старых версиях вместо этого включается «Режим разработчика».".into(),
+                        ),
+                    }
+                    steps.push(
+                        "3. Нажмите «Установить скрипт» и подтвердите установку в окне Tampermonkey.".into(),
+                    );
+                    steps.push(match family {
+                        browsers::Family::Firefox => "4. Настройки → Общие → Файлы и приложения: выключите «Всегда спрашивать, куда сохранять файлы», чтобы файлы сразу попадали в папку загрузок.".into(),
+                        _ => "4. Настройки → Загрузки: выключите «Всегда указывать место для скачивания», чтобы файлы сразу попадали в папку загрузок.".into(),
+                    });
+                    for step in &steps {
+                        ui.add(egui::Label::new(ui::text(step, 13.0, W::Regular, p.text2)).wrap());
+                    }
+                    ui.add(
+                        egui::Label::new(ui::text(
+                            "Скрипт работает только во вкладках, открытых лаунчером, и нажимает лишь бесплатные кнопки загрузки (ModsFire, Sharemods, mods.to, Google Drive, страницы авторов). Проверку Cloudflare он не трогает — её проходите вы.",
+                            12.0,
+                            W::Regular,
+                            p.muted,
+                        ))
+                        .wrap(),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        if Button::new("Открыть Tampermonkey", Kind::Ghost)
+                            .trailing(Icon::External)
+                            .height(40.0)
+                            .size(13.0)
+                            .show(ui, &p)
+                            .clicked()
+                            && let Err(error) =
+                                browsers::open_url(browsers::tampermonkey_page(family))
+                        {
+                            self.note = Some(format!("Не удалось открыть браузер: {error}"));
+                        }
+                        if Button::new("Установить скрипт", Kind::Primary)
+                            .height(40.0)
+                            .size(13.0)
+                            .show(ui, &p)
+                            .clicked()
+                        {
+                            let result = crate::userscript::serve(self.runtime.as_ref().unwrap())
+                                .and_then(|url| Ok(browsers::open_url(&url)?));
+                            self.note = Some(match result {
+                                Ok(()) => "В браузере откроется окно Tampermonkey — нажмите «Установить». Если вместо него показан текст скрипта, сначала установите Tampermonkey.".into(),
+                                Err(error) => format!("Не удалось открыть установку скрипта: {error}"),
+                            });
+                        }
+                        if Button::new("Скопировать скрипт", Kind::Ghost)
+                            .height(40.0)
+                            .size(13.0)
+                            .show(ui, &p)
+                            .on_hover_text("Tampermonkey → «Создать новый скрипт» → вставить")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(crate::userscript::SCRIPT.to_owned());
+                            self.note = Some("Скрипт скопирован: в Tampermonkey создайте новый скрипт, вставьте текст и сохраните.".into());
+                        }
+                    });
+                });
+            });
+        if changed {
+            browsers::set_preferences(
+                self.settings.download_browser.clone(),
+                self.settings.browser_downloads.clone(),
+            );
+            if let Err(error) = self.settings.save() {
+                self.note = Some(error.to_string());
+            }
+        }
+    }
 }
 
-fn card() -> egui::Frame {
-    egui::Frame::new()
-        .fill(PANEL)
-        .stroke(Stroke::new(1.0_f32, LINE))
-        .corner_radius(12)
-        .inner_margin(24)
+/// One row of the settings card with the divider below it.
+fn settings_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    divider: bool,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let response = egui::Frame::new()
+        .inner_margin(Margin::symmetric(22, 20))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            content(ui);
+        })
+        .response;
+    if divider {
+        ui.painter().hline(
+            response.rect.x_range(),
+            response.rect.bottom(),
+            Stroke::new(1.0_f32, p.line_soft),
+        );
+    }
+}
+
+/// A settings row showing a folder with an "Изменить…" button; returns true when pressed.
+fn path_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    title: &str,
+    caption: Option<&str>,
+    path: &str,
+    enabled: bool,
+) -> bool {
+    let button = Button::new("Изменить…", Kind::Raised)
+        .height(40.0)
+        .size(13.0)
+        .pad(14.0)
+        .enabled(enabled);
+    let width = button.width(ui);
+    let mut clicked = false;
+    settings_row(ui, p, true, |ui| {
+        ui::split_row(
+            ui,
+            width,
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.label(ui::text(title, 15.0, W::Bold, p.text));
+                if let Some(caption) = caption {
+                    ui.label(ui::text(caption, 12.0, W::Regular, p.muted));
+                }
+                ui.add(egui::Label::new(ui::mono_text(path, 12.0, false, p.text2)).wrap());
+            },
+            |ui| clicked = button.show(ui, p).clicked(),
+        );
+    });
+    clicked
 }
 
 impl eframe::App for Launcher {
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(script) = &mut self.script {
+            script.input(ctx, raw_input);
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_game_search();
         self.poll_catalogs();
+        self.poll_closed();
         let transfer = download::snapshot(&self.state);
-        self.maps.tick(
+        if let Some(stage) = stage_of(&transfer.status) {
+            self.stage = stage;
+        }
+        self.quper.tick(
             ctx,
             self.runtime.as_ref().unwrap(),
             &self.settings,
             transfer.active(),
         );
-        let busy = transfer.active() || self.maps.busy();
+        let busy = transfer.active() || self.quper.busy();
         if !busy {
             for game in Game::ALL {
                 self.refresh_catalog(ctx, game, false);
+            }
+            if self.page == Page::Dlc {
+                self.check_closed(ctx);
             }
         }
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -687,348 +2218,96 @@ impl eframe::App for Launcher {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_when_idle = true;
             self.cancel.cancel();
-            self.maps.cancel_all();
+            self.quper.cancel_all();
         }
         if self.close_when_idle && !busy {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if busy || self.game_search.is_some() {
+        if busy || self.searching.iter().any(|s| *s) {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+        if self.page != Page::Quper {
+            self.quper.suspend_browser();
+        }
+        let p = self.palette;
+        let locked = transfer.active() || self.quper.preparing();
+        egui::SidePanel::left("navigation")
+            .exact_width(248.0)
+            .resizable(false)
+            .show_separator_line(true)
+            .frame(
+                egui::Frame::new()
+                    .fill(p.side)
+                    .inner_margin(Margin::symmetric(16, 24)),
+            )
+            .show(ctx, |ui| self.sidebar(ui, ctx, locked));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(30))
+            .frame(egui::Frame::new().fill(p.bg))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.maps_open, false, "DLC и настройки игры");
-                    ui.selectable_value(&mut self.maps_open, true, "Сборки Quper");
-                });
-                ui.add_space(12.0);
-                if self.maps_open {
-                    egui::ScrollArea::vertical().id_salt("maps-page").show(ui, |ui| {
-                        self.maps.show(ui, ctx, frame, self.runtime.as_ref().unwrap(), &mut self.settings, transfer.active());
-                    });
+                if self.page == Page::Quper && self.quper.browser_visible() {
+                    egui::Frame::new()
+                        .inner_margin(Margin {
+                            left: 40,
+                            right: 40,
+                            top: 28,
+                            bottom: 20,
+                        })
+                        .show(ui, |ui| {
+                            self.quper.show(
+                                ui,
+                                ctx,
+                                frame,
+                                self.runtime.as_ref().unwrap(),
+                                &mut self.settings,
+                                transfer.active(),
+                                &p,
+                                &self.stripes,
+                            );
+                        });
                     return;
                 }
-                self.maps.suspend_browser();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(42.0)));
-                        ui.label(RichText::new("TRUCK").size(28.0).strong().color(GREEN));
-                        ui.label(RichText::new("LAUNCHER").size(16.0).strong());
-                    });
-                    let previous = self.settings.selected_game;
-                    let mut selected = previous;
-                    ui.add_enabled_ui(!busy, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut selected,
-                                Game::Ets2,
-                                "Euro Truck Simulator 2",
-                            );
-                            ui.selectable_value(
-                                &mut selected,
-                                Game::Ats,
-                                "American Truck Simulator",
-                            );
-                        });
-                    });
-                    if selected != previous {
-                        self.settings.selected_game = selected;
-                        self.note = None;
-                        self.source_editor = self.settings.source(selected).to_owned();
-                        download::set_state(&self.state, |s| *s = Transfer::default());
-                        self.search_game(ctx, true);
-                        if let Err(error) = self.settings.save() {
-                            self.note = Some(error.to_string());
-                        }
-                    }
-                    let catalog = self.catalogs[selected.index()].catalog.clone();
-                    let refreshing = self.catalogs[selected.index()].refreshing;
-                    let catalog_error = self.catalogs[selected.index()].error.clone();
-                    if catalog.as_ref().is_some_and(|c| c.select(Channel::Beta).is_ok()) || self.settings.channel() == Channel::Beta {
-                        let previous_channel = self.settings.channel();
-                        let mut channel = previous_channel;
-                        ui.add_enabled_ui(!busy, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new("Ветка:").size(12.0).color(MUTED));
-                                for (value, name) in [(Channel::Stable, "Обычная"), (Channel::Beta, "Beta")] {
-                                    let release = catalog.as_ref().and_then(|c| c.select(value).ok());
-                                    let label = release.and_then(|r| r.version.as_ref()).map(|version| format!("{name} · {version}")).unwrap_or_else(|| format!("{name} · недоступна"));
-                                    ui.add_enabled_ui(release.is_some(), |ui| { ui.selectable_value(&mut channel, value, label); });
-                                }
-                            });
-                        });
-                        ui.label(
-                            RichText::new("Выберите ту же ветку, что установлена в Steam.")
-                                .size(11.0)
-                                .color(MUTED),
-                        );
-                        if previous_channel != channel {
-                            self.settings.set_channel(selected, channel);
-                            self.note = None;
-                            download::set_state(&self.state, |s| *s = Transfer::default());
-                            if let Err(error) = self.settings.save() {
-                                self.note = Some(error.to_string());
-                            }
-                        }
-                    }
-                    let release = catalog.as_ref().and_then(|c| c.select(self.settings.channel()).ok());
-                    ui.add_space(16.0);
-                    card().show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.label(
-                            RichText::new(format!("{} · DLC Maps", selected.short_name()))
-                                .size(34.0)
-                                .strong(),
-                        );
-                        if let Some(release) = release {
-                            ui.label(RichText::new(format!("Версия на источнике: {}", release.version.as_deref().unwrap_or("не указана"))).color(GREEN));
-                            ui.add(egui::Label::new(RichText::new(format!("{} · {}", release.file.name, release.size_label.as_deref().unwrap_or("размер уточнится при загрузке"))).size(12.0).color(MUTED)).wrap());
-                        } else {
-                            ui.label(RichText::new(if refreshing { "Проверяем актуальные файлы PlayGround…" } else { "Для выбранной ветки нет доступного архива" }).color(MUTED));
-                        }
-                        ui.horizontal(|ui| {
-                            if refreshing { ui.spinner(); }
-                            let stamp = catalog.as_ref().map(|c| {
-                                let age = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().saturating_sub(c.checked_at);
-                                if age < 60 { "Данные обновлены только что".into() } else { format!("Данные проверены {} мин назад", age / 60) }
-                            }).unwrap_or_else(|| "Нет сохранённых данных".into());
-                            ui.label(RichText::new(stamp).size(11.0).color(MUTED));
-                            if ui.add_enabled(!busy && !refreshing, egui::Button::new("Обновить данные")).clicked() { self.refresh_catalog(ctx, selected, true); }
-                        });
-                        if let Some(error) = &catalog_error {
-                            ui.add(egui::Label::new(RichText::new(format!("Не удалось обновить: {error}{}", if catalog.is_some() { ". Показаны сохранённые данные; перед установкой источник будет проверен заново." } else { "" })).size(11.0).color(Color32::from_rgb(255,184,120))).wrap());
-                        }
-                        ui.label(
-                            RichText::new("Скачивание и установка дополнений одной кнопкой")
-                                .color(MUTED),
-                        );
-                        ui.add_space(14.0);
-                        let game_label = if self.game_search.is_some() {
-                            "Поиск игры…".into()
-                        } else {
-                            self.settings
-                                .directory(selected)
-                                .map(|p| format!("{}: {}", selected.short_name(), p.display()))
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "{} не найдена — выберите папку в настройках",
-                                        selected.short_name()
-                                    )
-                                })
-                        };
-                        ui.add(
-                            egui::Label::new(RichText::new(game_label).size(12.0).color(MUTED))
-                                .wrap(),
-                        );
-                        ui.add_space(12.0);
-                        let button = egui::Button::new(
-                            RichText::new("↓   Установить DLC")
-                                .strong()
-                                .size(18.0)
-                                .color(BG),
-                        )
-                        .fill(GREEN)
-                        .corner_radius(8)
-                        .min_size(Vec2::new(ui.available_width(), 52.0));
-                        if ui
-                            .add_enabled(
-                                !busy
-                                    && release.is_some()
-                                    && self.settings.directory(selected).is_some()
-                                    && self.game_search.is_none(),
-                                button,
-                            )
-                            .clicked()
-                        {
-                            self.start_install();
-                        }
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("Торрент → загрузка архива → распаковка → установка")
-                                .size(12.0)
-                                .color(MUTED),
-                        );
-                    });
-                    ui.add_space(6.0);
-                    card().show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        let heading = match transfer.status {
-                            Status::Ready => "Готов к установке",
-                            Status::Connecting => "Подготовка загрузки",
-                            Status::Downloading => "Скачивание архива",
-                            Status::Extracting => "Распаковка архива",
-                            Status::Installing => "Установка файлов",
-                            Status::RollingBack => "Восстановление файлов",
-                            Status::Complete => "DLC установлены",
-                            Status::Cancelled => "Установка остановлена",
-                            Status::Error => "Не удалось установить DLC",
-                        };
-                        let color = match transfer.status {
-                            Status::Complete => GREEN,
-                            Status::Error => Color32::from_rgb(255, 135, 135),
-                            _ => Color32::WHITE,
-                        };
-                        ui.horizontal(|ui| {
-                            if busy {
-                                ui.spinner();
-                            }
-                            ui.label(RichText::new(heading).strong().color(color));
-                        });
-                        if matches!(
-                            transfer.status,
-                            Status::Downloading | Status::Installing | Status::Complete
-                        ) {
-                            ui.add(
-                                egui::ProgressBar::new(transfer.progress())
-                                    .fill(GREEN)
-                                    .show_percentage(),
-                            );
-                        }
-                        if transfer.status == Status::Downloading {
-                            let total = transfer
-                                .total
-                                .map(format_bytes)
-                                .unwrap_or_else(|| "…".into());
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} / {total}  ·  {} / с  ·  пиров: {}",
-                                    format_bytes(transfer.downloaded),
-                                    format_bytes(transfer.speed),
-                                    transfer.peers
-                                ))
-                                .size(12.0)
-                                .color(MUTED),
-                            );
-                        }
-                        let message = if self.close_when_idle {
-                            "Завершаем остановку и восстановление файлов перед закрытием…"
-                        } else if transfer.status == Status::Ready {
-                            "Нажмите «Установить DLC». Игра должна быть закрыта."
-                        } else {
-                            transfer.message.as_str()
-                        };
-                        if busy && !transfer.name.is_empty() { ui.add(egui::Label::new(RichText::new(&transfer.name).size(12.0).color(MUTED)).wrap()); }
-                        ui.add(
-                            egui::Label::new(RichText::new(message).size(12.0).color(MUTED)).wrap(),
-                        );
-                        if busy && transfer.status != Status::RollingBack {
-                            if ui
-                                .add_enabled(
-                                    !self.cancel.is_cancelled(),
-                                    egui::Button::new("Остановить"),
-                                )
-                                .clicked()
-                            {
-                                self.cancel.cancel();
-                            }
-                        } else if transfer.status == Status::Complete
-                            && ui.small_button("Открыть папку игры").clicked()
-                            && let Some(path) = &transfer.saved_to
-                            && let Err(error) = open::that(path)
-                        {
-                            self.note = Some(error.to_string());
-                        }
-                    });
-                    ui.add_space(8.0);
-                    ui.add_enabled_ui(!busy, |ui| {
-                        egui::CollapsingHeader::new("Настройки").show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .button(format!("Выбрать папку {}", selected.short_name()))
-                                    .clicked()
-                                    && let Some(folder) = rfd::FileDialog::new()
-                                        .set_title(format!("Папка {}", selected.name()))
-                                        .pick_folder()
-                                {
-                                    if game::is_installation(selected, &folder) {
-                                        self.game_search = None;
-                                        self.settings.set_directory(selected, Some(folder));
-                                        if let Err(error) = self.settings.save() {
-                                            self.note = Some(error.to_string());
+                let (id, max_width, top) = match self.page {
+                    Page::Dlc => ("dlc-page", 940.0_f32, 32),
+                    Page::Quper if self.quper.has_selection() => ("quper-build", 1000.0, 28),
+                    Page::Quper => ("quper-page", 1000.0, 32),
+                    Page::Settings => ("settings-page", 820.0, 32),
+                };
+                egui::ScrollArea::vertical()
+                    .id_salt(id)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Frame::new()
+                            .inner_margin(Margin {
+                                left: 40,
+                                right: 40,
+                                top,
+                                bottom: 40,
+                            })
+                            .show(ui, |ui| {
+                                ui.set_max_width(max_width.min(ui.available_width()));
+                                ui.spacing_mut().item_spacing.y = 20.0;
+                                match self.page {
+                                    Page::Dlc => {
+                                        self.dlc_page(ui, ctx, &transfer, transfer.active())
+                                    }
+                                    Page::Quper => {
+                                        if self.quper.show(
+                                            ui,
+                                            ctx,
+                                            frame,
+                                            self.runtime.as_ref().unwrap(),
+                                            &mut self.settings,
+                                            transfer.active(),
+                                            &p,
+                                            &self.stripes,
+                                        ) {
+                                            self.page = Page::Settings;
                                         }
-                                    } else {
-                                        self.note = Some(format!(
-                                            "В папке не найден bin/win_x64/{}.",
-                                            selected.executable()
-                                        ));
                                     }
-                                }
-                                if ui
-                                    .add_enabled(
-                                        self.game_search.is_none(),
-                                        egui::Button::new("Найти автоматически"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.search_game(ctx, false);
+                                    Page::Settings => self.settings_page(ui, ctx, busy),
                                 }
                             });
-                            ui.label(
-                                RichText::new(format!(
-                                    "Кэш загрузок: {}",
-                                    self.settings.download_directory(selected).display()
-                                ))
-                                .size(12.0)
-                                .color(MUTED),
-                            );
-                            ui.label(RichText::new("Страница источника PlayGround").size(12.0).color(MUTED));
-                            ui.add(egui::TextEdit::singleline(&mut self.source_editor).desired_width(ui.available_width()));
-                            ui.horizontal(|ui| {
-                                if ui.button("Применить ссылку").clicked() {
-                                    match self.settings.set_source(selected, &self.source_editor) {
-                                        Ok(()) => {
-                                            self.note = self.settings.save().err().map(|e| e.to_string());
-                                            self.source_editor = self.settings.source(selected).to_owned();
-                                            self.refresh_catalog(ctx, selected, true);
-                                        },
-                                        Err(error) => self.note = Some(error.to_string()),
-                                    }
-                                }
-                                if ui.button("Сбросить ссылку").clicked() {
-                                    let _ = self.settings.set_source(selected, "");
-                                    self.source_editor = self.settings.source(selected).to_owned();
-                                    self.note = self.settings.save().err().map(|e| e.to_string());
-                                    self.refresh_catalog(ctx, selected, true);
-                                }
-                            });
-                            if ui.button("Изменить папку загрузки").clicked()
-                                && let Some(folder) = rfd::FileDialog::new()
-                                    .set_directory(&self.settings.output)
-                                    .pick_folder()
-                            {
-                                self.settings.output = folder;
-                                if let Err(error) = self.settings.save() {
-                                    self.note = Some(error.to_string());
-                                }
-                            }
-                            ui.label(
-                                RichText::new(
-                                    "Резервные копии: .ets-launcher/backups в папке игры",
-                                )
-                                .size(12.0)
-                                .color(MUTED),
-                            );
-                        });
                     });
-                    if let Some(note) = &self.note {
-                        ui.colored_label(Color32::from_rgb(255, 184, 120), note);
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Источник:").size(11.0).color(MUTED));
-                        if ui.small_button("PlayGround ↗").clicked()
-                            && let Err(error) = open::that(self.settings.source(selected))
-                        {
-                            self.note = Some(error.to_string());
-                        }
-                        ui.label(
-                            RichText::new("Rust · встроенный BitTorrent")
-                                .size(11.0)
-                                .color(MUTED),
-                        );
-                    });
-                });
             });
     }
 }
@@ -1036,7 +2315,7 @@ impl eframe::App for Launcher {
 impl Drop for Launcher {
     fn drop(&mut self) {
         self.cancel.cancel();
-        self.maps.cancel_all();
+        self.quper.cancel_all();
         for state in &self.catalogs {
             state.cancel.cancel();
         }

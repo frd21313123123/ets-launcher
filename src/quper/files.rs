@@ -96,6 +96,173 @@ pub enum Step {
     Trucky,
 }
 
+/// A part of a split archive: "pack.zip.001" is part 1 of "pack.zip",
+/// "pack.part2.rar" is part 2 of "pack.rar". Whole files give `None`.
+pub fn split_part(name: &str) -> Option<(String, u32)> {
+    let lower = name.to_ascii_lowercase();
+    if let Some((base, number)) = lower.rsplit_once('.')
+        && number.len() == 3
+        && number.bytes().all(|b| b.is_ascii_digit())
+        && !base.is_empty()
+    {
+        // A part saved again is "pack.7z(1).001"; it belongs with "pack.7z.002".
+        let base = browser_copy_base(base).unwrap_or(base);
+        return Some((base.to_owned(), number.parse().ok()?));
+    }
+    let stem = lower.strip_suffix(".rar")?;
+    let (base, number) = stem.rsplit_once(".part")?;
+    if base.is_empty() || number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((format!("{base}.rar"), number.parse().ok()?))
+}
+
+/// The parts of one split archive under one name, as the archiver finds the
+/// other parts by the first one's name. Parts already named alike are used as
+/// they are; otherwise ("pack.7z(1).001" next to "pack.7z.002") they are linked
+/// (or copied) into a new temporary folder under `base`'s name. The visitor's
+/// own files are never renamed.
+pub fn uniform_parts(
+    base: &str,
+    parts: &std::collections::BTreeMap<u32, std::path::PathBuf>,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let uniform = |original: &str| {
+        let lower = original.to_ascii_lowercase();
+        if let Some(stem) = lower.strip_suffix(".rar")
+            && let Some((_, number)) = stem.rsplit_once(".part")
+        {
+            return format!(
+                "{}.part{number}.rar",
+                base.strip_suffix(".rar").unwrap_or(base)
+            );
+        }
+        let number = lower.rsplit_once('.').map_or("", |(_, n)| n);
+        format!("{base}.{number}")
+    };
+    let name = |path: &std::path::Path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    if parts
+        .values()
+        .all(|path| name(path).to_ascii_lowercase() == uniform(&name(path)))
+    {
+        return Ok(parts.values().cloned().collect());
+    }
+    let folder = std::env::temp_dir().join(format!(
+        "ets-launcher-parts-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir(&folder)?;
+    let mut linked = Vec::new();
+    for path in parts.values() {
+        let target = folder.join(uniform(&name(path)));
+        if std::fs::hard_link(path, &target).is_err() {
+            std::fs::copy(path, &target)?;
+        }
+        linked.push(target);
+    }
+    Ok(linked)
+}
+
+/// A browser's unfinished download (Chrome, Edge, Firefox, Zen, Opera, Safari).
+pub fn unfinished_download(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".crdownload",
+        ".part",
+        ".partial",
+        ".download",
+        ".opdownload",
+        ".tmp",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix))
+}
+
+/// The final name (lowercase) an unfinished download will get: Chrome's
+/// "mod.zip.crdownload" becomes "mod.zip", Firefox's "mod.Ab12Cd3_.scs.part"
+/// (a random 8-character piece after the first dot) becomes "mod.scs".
+pub fn download_target(unfinished: &str) -> Option<String> {
+    let lower = unfinished.to_lowercase();
+    let (name, suffix) = lower.rsplit_once('.')?;
+    if suffix != "part" {
+        return unfinished_download(&lower).then(|| name.to_owned());
+    }
+    let pieces = name.split('.').collect::<Vec<_>>();
+    let random = (1..pieces.len().saturating_sub(1)).find(|&i| {
+        pieces[i].len() == 8
+            && pieces[i]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    });
+    Some(match random {
+        Some(i) => [&pieces[..i], &pieces[i + 1..]].concat().join("."),
+        None => name.to_owned(),
+    })
+}
+
+/// An unfinished download that will become a mod or archive: Firefox's
+/// "mod.Ab12.scs.part", Chrome's "mod.zip.crdownload" or its nameless
+/// "Unconfirmed 123.crdownload". Videos and other downloads give `false`.
+pub fn unfinished_mod(name: &str) -> bool {
+    if !unfinished_download(name) {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    let Some((target, _)) = lower.rsplit_once('.') else {
+        return false;
+    };
+    allowed_filename(target) || target.starts_with("unconfirmed ")
+}
+
+/// The original name of a file a browser saved again under a numbered name:
+/// "mod(1)" or "mod (2)" gives "mod". Other names give `None`.
+pub fn browser_copy_base(stem: &str) -> Option<&str> {
+    let open = stem.strip_suffix(')')?.rfind('(')?;
+    let number = &stem[open + 1..stem.len() - 1];
+    if number.is_empty() || number.len() > 3 || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let base = stem[..open].trim_end();
+    (!base.is_empty()).then_some(base)
+}
+
+/// File hosts the launcher knows how to download from; any other site is an
+/// author's own page that links to one of them.
+pub fn is_file_host(url: &Url) -> bool {
+    matches!(
+        url.host_str().map(|h| h.trim_start_matches("www.")),
+        Some(
+            "sharemods.com"
+                | "modsfire.com"
+                | "mods.to"
+                | "wdfiles.ru"
+                | "drive.google.com"
+                | "drive.usercontent.google.com"
+                | "truckymods.io"
+                | "beta.truckymods.io"
+        )
+    )
+}
+
+/// The current download of an author's page: the first "Download"/"Скачать"
+/// link that leads to a file host. Older versions listed further down the page
+/// are ignored.
+pub fn primary_download(base: &Url, html: &str) -> Option<Url> {
+    let doc = Html::parse_document(html);
+    let label = regex::Regex::new(r"(?i)^\s*(download|скачать)\b").ok()?;
+    doc.select(&Selector::parse("a[href]").unwrap())
+        .filter(|a| label.is_match(&a.text().collect::<String>()))
+        .filter_map(|a| base.join(a.value().attr("href")?).ok())
+        .find(|url| public_url(url.as_str()).is_ok() && is_file_host(url))
+}
+
 /// Select the host's actual free form, ignoring login forms and advertising.
 pub fn page_step(base: &Url, html: &str) -> Result<Step> {
     let doc = Html::parse_document(html);
@@ -320,6 +487,27 @@ async fn save_response(
     Ok(target)
 }
 
+/// The direct download address of a Google Drive file page.
+pub fn google_download(page: &Url) -> Result<Url> {
+    let id = page
+        .path_segments()
+        .and_then(|s| {
+            let p = s.collect::<Vec<_>>();
+            (p.len() >= 3 && p[0] == "file" && p[1] == "d").then(|| p[2].to_owned())
+        })
+        .or_else(|| {
+            page.query_pairs()
+                .find(|(k, _)| k == "id")
+                .map(|(_, v)| v.into_owned())
+        })
+        .context("Нет ID файла Google Drive")?;
+    let mut url = Url::parse("https://drive.usercontent.google.com/download")?;
+    url.query_pairs_mut()
+        .append_pair("id", &id)
+        .append_pair("export", "download");
+    Ok(url)
+}
+
 pub async fn download_source(
     url: &str,
     output: &Path,
@@ -329,24 +517,7 @@ pub async fn download_source(
     let client = source::client()?;
     let mut first = public_url(url)?;
     if first.host_str() == Some("drive.google.com") {
-        let id = first
-            .path_segments()
-            .and_then(|s| {
-                let p = s.collect::<Vec<_>>();
-                (p.len() >= 3 && p[0] == "file" && p[1] == "d").then(|| p[2].to_owned())
-            })
-            .or_else(|| {
-                first
-                    .query_pairs()
-                    .find(|(k, _)| k == "id")
-                    .map(|(_, v)| v.into_owned())
-            })
-            .context("Нет ID файла Google Drive")?;
-        first = Url::parse("https://drive.usercontent.google.com/download")?;
-        first
-            .query_pairs_mut()
-            .append_pair("id", &id)
-            .append_pair("export", "download");
+        first = google_download(&first)?;
     }
     let mut queue = vec![(
         first.to_string(),
@@ -457,6 +628,19 @@ async fn trucky_file(
     cookies: &str,
     cancel: &CancellationToken,
 ) -> Result<(String, String)> {
+    let file = trucky_link(client, base, html, cookies, cancel).await?;
+    tokio::select! { _ = cancel.cancelled() => bail!("Загрузка остановлена"), _ = tokio::time::sleep(Duration::from_secs(10)) => {} }
+    Ok(file)
+}
+
+/// The file address and name TruckyMods' own download button requests.
+pub(super) async fn trucky_link(
+    client: &Client,
+    base: &Url,
+    html: &str,
+    cookies: &str,
+    cancel: &CancellationToken,
+) -> Result<(String, String)> {
     let (project, build, csrf) = crate::maps::access::trucky_request(html)?;
     let mut request = client
         .post(base.join("/projects/createDownloadUrl")?)
@@ -486,13 +670,122 @@ async fn trucky_file(
         .context("Нет имени файла TruckyMods")?
         .to_owned();
     ensure!(allowed_filename(&name), "Некорректный файл TruckyMods");
-    tokio::select! { _ = cancel.cancelled() => bail!("Загрузка остановлена"), _ = tokio::time::sleep(Duration::from_secs(10)) => {} }
     Ok((url, name))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_archive_parts_are_recognised() {
+        assert_eq!(
+            split_part("ProMods.zip.001"),
+            Some(("promods.zip".into(), 1))
+        );
+        assert_eq!(
+            split_part("promods.7z.012"),
+            Some(("promods.7z".into(), 12))
+        );
+        assert_eq!(split_part("map.part2.rar"), Some(("map.rar".into(), 2)));
+        assert_eq!(
+            split_part("promods-tgs-v170.7z(1).001"),
+            Some(("promods-tgs-v170.7z".into(), 1))
+        );
+        let downloads = tempfile::tempdir().unwrap();
+        let part = |name: &str| {
+            let path = downloads.path().join(name);
+            std::fs::write(&path, name).unwrap();
+            path
+        };
+        let same = std::collections::BTreeMap::from([
+            (1, part("ProMods.7z.001")),
+            (2, part("ProMods.7z.002")),
+        ]);
+        assert_eq!(
+            uniform_parts("promods.7z", &same).unwrap(),
+            same.values().cloned().collect::<Vec<_>>()
+        );
+        let mixed = std::collections::BTreeMap::from([
+            (1, part("promods-tgs-v170.7z(1).001")),
+            (2, part("promods-tgs-v170.7z.002")),
+        ]);
+        let linked = uniform_parts("promods-tgs-v170.7z", &mixed).unwrap();
+        let names = linked
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["promods-tgs-v170.7z.001", "promods-tgs-v170.7z.002"]
+        );
+        assert_eq!(
+            std::fs::read(&linked[0]).unwrap(),
+            b"promods-tgs-v170.7z(1).001"
+        );
+        assert!(
+            downloads
+                .path()
+                .join("promods-tgs-v170.7z(1).001")
+                .is_file()
+        );
+        std::fs::remove_dir_all(linked[0].parent().unwrap()).unwrap();
+        assert_eq!(split_part("map.rar"), None);
+        assert_eq!(split_part("promods-eu-map-v284.scs"), None);
+        assert!(unfinished_download("promods.zip.001.crdownload"));
+        assert!(unfinished_download("promods.zip.002.part"));
+        assert!(!unfinished_download("map.part2.rar"));
+        assert!(unfinished_mod("BXPrcRussiaPoland161.Xy9z.scs.part"));
+        assert!(unfinished_mod("promods.zip.002.part"));
+        assert!(unfinished_mod("Unconfirmed 812345.crdownload"));
+        assert!(!unfinished_mod("video.mp4.part"));
+        assert!(!unfinished_mod("map.part2.rar"));
+        let target = |name| download_target(name).unwrap();
+        assert_eq!(
+            target("BXPrcRussiaPoland161(2).yMuziJkb.scs.part"),
+            "bxprcrussiapoland161(2).scs"
+        );
+        assert_eq!(
+            target("Koromyslovo Add-on for Project Russia 1.QI_h2t9u.5(6).scs.part"),
+            "koromyslovo add-on for project russia 1.5(6).scs"
+        );
+        assert_eq!(target("promods.zip.001.crdownload"), "promods.zip.001");
+        assert_eq!(target("VolgaMap_1_5_3.scs.part"), "volgamap_1_5_3.scs");
+    }
+
+    #[test]
+    fn numbered_browser_copies_give_the_original_name() {
+        assert_eq!(
+            browser_copy_base("Koromyslovo Add-on for Project Russia 1.5(1)"),
+            Some("Koromyslovo Add-on for Project Russia 1.5")
+        );
+        assert_eq!(browser_copy_base("ulmap10 (12)"), Some("ulmap10"));
+        assert_eq!(browser_copy_base("ulmap10"), None);
+        assert_eq!(browser_copy_base("map (beta)"), None);
+        assert_eq!(browser_copy_base("(1)"), None);
+    }
+
+    #[test]
+    fn an_author_page_resolves_to_its_current_download() {
+        let base =
+            Url::parse("https://kieqw.github.io/kieqwmods.github.io/koromyslovo.html").unwrap();
+        let html = r#"<nav><a href="index.html">News</a></nav>
+            <a href="https://truckymods.io/euro-truck-simulator-2/maps/project-russia">Project Russia</a>
+            <a href="https://modsfire.com/f69b7lEnUu3pT4y" class="btn btn-download">Download (1.76 MB)</a>
+            <div class="version"><a href="https://modsfire.com/C683GWhsCv2qlR4" class="btn btn-version-download">Download</a></div>"#;
+        assert_eq!(
+            primary_download(&base, html).unwrap().as_str(),
+            "https://modsfire.com/f69b7lEnUu3pT4y"
+        );
+        assert!(
+            primary_download(&base, r#"<a href="https://example.com/x">Download</a>"#).is_none()
+        );
+        assert!(primary_download(&base, r#"<a href="https://boosty.to/a">Скачать</a>"#).is_none());
+        assert!(is_file_host(
+            &Url::parse("https://www.modsfire.com/a").unwrap()
+        ));
+        assert!(!is_file_host(&base));
+    }
     use std::sync::{Arc, Mutex};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},

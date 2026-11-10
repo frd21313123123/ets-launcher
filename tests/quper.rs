@@ -367,3 +367,231 @@ async fn one_outer_archive_supplies_multiple_packages_and_keeps_original_filenam
         .unwrap();
     assert!(report.missing.is_empty() && report.home.is_some());
 }
+
+#[tokio::test]
+async fn local_profile_lists_the_build_in_order_and_never_replaces_other_mods() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let documents = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let plan = plan();
+    let cancel = CancellationToken::new();
+    let docs = documents.path().join("Euro Truck Simulator 2");
+    fs::create_dir_all(docs.join("mod")).unwrap();
+    // The player already has a different mod with the same file name.
+    fs::write(docs.join("mod/addon.scs"), b"someone else's mod").unwrap();
+    fs::write(
+        docs.join("config.cfg"),
+        "uset g_lang \"ru\"\nuset r_buffer_page_size \"10\"\n",
+    )
+    .unwrap();
+    library
+        .import(
+            &plan,
+            &[
+                scs(inputs.path(), "base.scs", 1),
+                scs(inputs.path(), "addon.scs", 2),
+            ],
+            &transfer(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let created = library
+        .create_local_profile(&plan, documents.path(), &transfer(), &cancel)
+        .unwrap();
+    assert!(!created.updated);
+    assert_eq!(created.mods, 2);
+    assert_eq!(
+        fs::read(docs.join("mod/addon.scs")).unwrap(),
+        b"someone else's mod"
+    );
+    assert!(docs.join("mod/base.scs").is_file());
+    assert!(docs.join("mod/addon_quper1.scs").is_file());
+    let profile = fs::read_to_string(created.profile.join("profile.sii")).unwrap();
+    assert!(created.profile.starts_with(docs.join("profiles")));
+    assert!(profile.contains("profile_name: \"Quper QUPER MAP COMBO\""));
+    assert!(profile.contains("active_mods: 2"));
+    assert!(profile.contains("active_mods[0]: \"base|base\""));
+    assert!(profile.contains("active_mods[1]: \"addon_quper1|addon_quper1\""));
+    let config = fs::read_to_string(docs.join("config.cfg")).unwrap();
+    assert!(config.contains("uset g_lang \"ru\""));
+    assert!(config.contains("uset r_buffer_page_size \"30\""));
+    assert!(!config.contains("\"10\""));
+
+    // Running it again reuses the files and keeps the career.
+    fs::write(created.profile.join("career.fixture"), "keep my progress").unwrap();
+    let again = library
+        .create_local_profile(&plan, documents.path(), &transfer(), &cancel)
+        .unwrap();
+    assert!(again.updated);
+    assert_eq!(again.copied, 0);
+    assert!(!docs.join("mod/addon_quper2.scs").exists());
+    assert_eq!(
+        fs::read_to_string(again.profile.join("career.fixture")).unwrap(),
+        "keep my progress"
+    );
+    assert!(again.profile.join("profile.sii.launcher-backup").is_file());
+    let profile = fs::read_to_string(again.profile.join("profile.sii")).unwrap();
+    assert!(profile.contains("active_mods[0]: \"base|base\""));
+    assert!(profile.contains("active_mods[1]: \"addon_quper1|addon_quper1\""));
+}
+
+#[tokio::test]
+async fn local_profile_needs_the_whole_build() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let documents = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let plan = plan();
+    let cancel = CancellationToken::new();
+    library
+        .import(
+            &plan,
+            &[scs(inputs.path(), "base.scs", 1)],
+            &transfer(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        library
+            .create_local_profile(&plan, documents.path(), &transfer(), &cancel)
+            .is_err()
+    );
+    assert!(
+        !documents
+            .path()
+            .join("Euro Truck Simulator 2/profiles")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn partial_profile_lists_only_the_downloaded_mods() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let documents = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let plan = plan();
+    let cancel = CancellationToken::new();
+    // Nothing downloaded yet: there is no profile to make.
+    assert!(
+        library
+            .create_partial_profile(&plan, documents.path(), &transfer(), &cancel)
+            .is_err()
+    );
+    library
+        .import(
+            &plan,
+            &[scs(inputs.path(), "base.scs", 1)],
+            &transfer(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let created = library
+        .create_partial_profile(&plan, documents.path(), &transfer(), &cancel)
+        .unwrap();
+    assert_eq!((created.mods, created.skipped), (1, 1));
+    let profile = fs::read_to_string(created.profile.join("profile.sii")).unwrap();
+    assert!(profile.contains("active_mods: 1"));
+    assert!(profile.contains("active_mods[0]: \"base|base\""));
+
+    // The missing mod imported later joins the same profile, in order.
+    library
+        .import(
+            &plan,
+            &[scs(inputs.path(), "addon.scs", 2)],
+            &transfer(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let full = library
+        .create_local_profile(&plan, documents.path(), &transfer(), &cancel)
+        .unwrap();
+    assert!(full.updated);
+    assert_eq!((full.mods, full.skipped), (2, 0));
+    let profile = fs::read_to_string(full.profile.join("profile.sii")).unwrap();
+    assert!(profile.contains("active_mods: 2"));
+}
+
+#[tokio::test]
+async fn ats_local_profile_uses_the_ats_folder_and_module() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let documents = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let mut plan = plan();
+    plan.combo.game = Game::Ats;
+    let cancel = CancellationToken::new();
+    library
+        .import(
+            &plan,
+            &[
+                scs(inputs.path(), "base.scs", 1),
+                scs(inputs.path(), "addon.scs", 2),
+            ],
+            &transfer(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let created = library
+        .create_local_profile(&plan, documents.path(), &transfer(), &cancel)
+        .unwrap();
+    assert!(
+        created
+            .profile
+            .starts_with(documents.path().join("American Truck Simulator/profiles"))
+    );
+    assert!(!documents.path().join("Euro Truck Simulator 2").exists());
+    let profile = fs::read_to_string(created.profile.join("profile.sii")).unwrap();
+    assert!(profile.contains("/map/usa.mbd"));
+    assert!(profile.contains("brand: kenworth"));
+    assert_eq!(
+        fs::read_to_string(documents.path().join("American Truck Simulator/config.cfg")).unwrap(),
+        "uset r_buffer_page_size \"30\"\n"
+    );
+}
+
+#[tokio::test]
+async fn a_numbered_browser_copy_counts_as_the_mod_it_was_saved_from() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let plan = plan();
+    let report = library
+        .import(
+            &plan,
+            &[scs(inputs.path(), "addon(1).scs", 2)],
+            &transfer(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.missing, ["base"]);
+    let state = library.state(&plan.combo).unwrap();
+    assert_eq!(state.packages["addon"].filename, "addon.scs");
+    assert!(!state.packages.contains_key("addon(1)"));
+}
+
+#[tokio::test]
+async fn a_protected_scs_package_is_used_as_it_is() {
+    let root = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let plan = plan();
+    // Project Russia ships its package in its own "AEM!" container.
+    let path = inputs.path().join("base.scs");
+    let mut bytes = b"AEM!".to_vec();
+    bytes.extend([0u8; 64]);
+    fs::write(&path, bytes).unwrap();
+    let report = library
+        .import(&plan, &[path], &transfer(), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(report.missing, ["addon"]);
+}

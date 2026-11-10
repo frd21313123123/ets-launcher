@@ -124,6 +124,29 @@ impl Library {
         Ok(state)
     }
 
+    /// Progress of a release that was already started, without creating any folders:
+    /// `(ready mods, environment ready)`, or `None` when nothing was downloaded yet.
+    pub fn progress(&self, plan: &Plan) -> Result<Option<(usize, bool)>> {
+        let combo = &plan.combo;
+        combo.validate()?;
+        let release = self
+            .root
+            .join(&combo.id)
+            .join(key(&format!("{}-{}", combo.game_version, combo.version)));
+        if !release.join("packages").is_dir() {
+            return Ok(None);
+        }
+        let missing = self.missing(plan)?.len();
+        // Opening a build creates its folders; that alone is not a download.
+        if missing == plan.order.len() {
+            return Ok(None);
+        }
+        Ok(Some((
+            plan.order.len().saturating_sub(missing),
+            missing == 0 && self.ready_home(plan)?.is_some(),
+        )))
+    }
+
     pub fn missing(&self, plan: &Plan) -> Result<Vec<String>> {
         let release = self.release(&plan.combo)?;
         let state = self.state(&plan.combo)?;
@@ -382,11 +405,26 @@ impl Library {
             {
                 continue;
             }
-            let id = path
+            let mut id = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .context("Нет имени мода")?
                 .to_owned();
+            // A browser saving a file again names it "mod(1).scs"; the build
+            // knows it as "mod", so the copy is stored under its original name.
+            let mut stored = name.to_owned();
+            if !expected.contains(&id.to_lowercase())
+                && let Some(base) = files::browser_copy_base(&id)
+                && expected.contains(&base.to_lowercase())
+            {
+                let base = base.to_owned();
+                stored = match path.extension().and_then(|e| e.to_str()) {
+                    Some(extension) => format!("{base}.{extension}"),
+                    None => base.clone(),
+                };
+                id = base;
+            }
+            let name = stored.as_str();
             let mut magic = [0u8; 4];
             fs::File::open(&path)?
                 .read_exact(&mut magic)
@@ -395,7 +433,10 @@ impl Library {
                 s.status = Status::Extracting;
                 s.name = name.into();
             });
-            let entries = if ext == "scs" && &magic == b"SCS#" {
+            // A .scs is a game package whatever its container: SCS# (HashFS),
+            // a protected format such as Project Russia's "AEM!", or a ZIP.
+            // Only a ZIP one can be checked by the archiver.
+            let entries = if ext == "scs" && &magic != b"PK\x03\x04" {
                 None
             } else {
                 Some(archive::inspect(&path, cancel).await?)
@@ -532,16 +573,7 @@ impl Library {
             let name = profile_name(&plan.combo);
             let dir = docs.join("profiles").join(profile::folder_name(&name));
             fs::create_dir_all(&dir)?;
-            let module = match plan.combo.game {
-                Game::Ets2 => "/map/europe.mbd",
-                Game::Ats => "/map/usa.mbd",
-            };
-            let mut bytes = profile::create(&name, module, &plan.order)?;
-            if plan.combo.game == Game::Ats {
-                bytes = String::from_utf8(bytes)?
-                    .replace("brand: scania_r", "brand: kenworth")
-                    .into_bytes();
-            }
+            let bytes = new_profile(plan.combo.game, &name, &plan.order)?;
             fs::write(dir.join("profile.sii"), bytes)?;
             fs::write(docs.join("config.cfg"), "uset r_buffer_page_size \"30\"\n")?;
             crate::maps::write_json(&staging.join(".quper-plan.json"), plan)?;
@@ -602,6 +634,239 @@ impl Library {
             .spawn()?;
         Ok(())
     }
+}
+
+/// A build added to the game's ordinary documents folder by
+/// [`Library::create_local_profile`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalProfile {
+    pub name: String,
+    pub profile: PathBuf,
+    pub mods: usize,
+    /// Bytes copied because a hard link to the library was not possible.
+    pub copied: u64,
+    /// The profile already existed: its career was kept, only the mod list changed.
+    pub updated: bool,
+    /// Mods of the build left out because they are not downloaded.
+    pub skipped: usize,
+}
+
+impl Library {
+    /// Adds the build to the regular game folder `documents/<game>`: packages go to
+    /// `mod/` (hard links when possible) and a local profile lists them in the
+    /// author's order. A same-named profile keeps its career and gets a backup.
+    /// The caller checks that the game is closed: it rewrites profiles on exit.
+    pub fn create_local_profile(
+        &self,
+        plan: &Plan,
+        documents: &Path,
+        transfer: &SharedTransfer,
+        cancel: &CancellationToken,
+    ) -> Result<LocalProfile> {
+        self.local_profile(plan, documents, transfer, cancel, false)
+    }
+
+    /// Like [`Library::create_local_profile`], for a build some of whose files
+    /// could not be downloaded: the profile lists only the mods that are ready,
+    /// still in the author's order. Importing the rest later and creating the
+    /// profile again adds them while keeping the career.
+    pub fn create_partial_profile(
+        &self,
+        plan: &Plan,
+        documents: &Path,
+        transfer: &SharedTransfer,
+        cancel: &CancellationToken,
+    ) -> Result<LocalProfile> {
+        self.local_profile(plan, documents, transfer, cancel, true)
+    }
+
+    fn local_profile(
+        &self,
+        plan: &Plan,
+        documents: &Path,
+        transfer: &SharedTransfer,
+        cancel: &CancellationToken,
+        skip_missing: bool,
+    ) -> Result<LocalProfile> {
+        plan.validate()?;
+        let release = self.release(&plan.combo)?;
+        let _lock = self.lock(&release)?;
+        let missing = self.missing(plan)?;
+        ensure!(
+            skip_missing || missing.is_empty(),
+            "Сначала скачайте все файлы сборки"
+        );
+        let order = plan
+            .order
+            .iter()
+            .filter(|id| !missing.contains(*id))
+            .collect::<Vec<_>>();
+        ensure!(
+            !order.is_empty(),
+            "В сборке ещё нет ни одного скачанного мода"
+        );
+        let state = self.state(&plan.combo)?;
+        let game = plan.combo.game;
+        let docs = documents.join(game.name());
+        let mods = docs.join("mod");
+        fs::create_dir_all(&mods)?;
+        archive::ordinary_metadata(&mods)?;
+        remove_dangling_links(&mods);
+        let total = order.len();
+        let mut names = Vec::with_capacity(total);
+        let mut copied = 0;
+        for (index, id) in order.into_iter().enumerate() {
+            check(cancel)?;
+            let package = &state.packages[&id.to_lowercase()];
+            download::set_state(transfer, |s| {
+                s.status = Status::Installing;
+                s.name = package.filename.clone();
+                s.message = format!("Подключение модов к профилю: {} из {total}", index + 1);
+                s.downloaded = index as u64;
+                s.total = Some(total as u64);
+                s.speed = 0;
+            });
+            let source = release.join("packages").join(&package.filename);
+            let (target, stem) = local_target(&mods, package)?;
+            if !target.exists() && fs::hard_link(&source, &target).is_err() {
+                crate::install::ensure_space(&mods, package.size)?;
+                let partial = mods.join(format!("{}.launcher-part", package.filename));
+                let result =
+                    fs::copy(&source, &partial).and_then(|_| fs::rename(&partial, &target));
+                if result.is_err() {
+                    let _ = fs::remove_file(&partial);
+                }
+                result?;
+                copied += package.size;
+            }
+            // The author's identifier is kept unless the file had to be renamed.
+            names.push(if stem.eq_ignore_ascii_case(id) {
+                id.clone()
+            } else {
+                stem
+            });
+        }
+        check(cancel)?;
+        let name = profile_name(&plan.combo);
+        let dir = docs.join("profiles").join(profile::folder_name(&name));
+        let file = dir.join("profile.sii");
+        let updated = file.is_file();
+        let bytes = if updated {
+            let previous = fs::read(&file)?;
+            fs::write(dir.join("profile.sii.launcher-backup"), &previous)?;
+            profile::update(&previous, module(game), &names)?
+        } else {
+            fs::create_dir_all(&dir)?;
+            new_profile(game, &name, &names)?
+        };
+        let temporary = dir.join("profile.sii.launcher-new");
+        fs::write(&temporary, bytes)?;
+        fs::rename(&temporary, &file)?;
+        raise_buffer(&docs.join("config.cfg"))?;
+        download::set_state(transfer, |s| {
+            s.status = Status::Complete;
+            s.downloaded = total as u64;
+        });
+        Ok(LocalProfile {
+            name,
+            profile: dir,
+            mods: names.len(),
+            skipped: missing.len(),
+            copied,
+            updated,
+        })
+    }
+}
+
+/// Deletes symbolic links in `mods` whose target no longer exists. The game
+/// crashes at start when a mod entry cannot be opened; only the link itself is
+/// removed, never a real file.
+fn remove_dangling_links(mods: &Path) {
+    let Ok(entries) = fs::read_dir(mods) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_link = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+        if is_link && fs::metadata(&path).is_err() {
+            let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir(&path));
+        }
+    }
+}
+
+/// Where a package goes in the shared `mod` folder and the identifier the
+/// profile must use. Another mod with the same file name is never replaced.
+fn local_target(mods: &Path, package: &Package) -> Result<(PathBuf, String)> {
+    let path = Path::new(&package.filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .context("Некорректное имя пакета")?;
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("scs");
+    for attempt in 0..100 {
+        let candidate = if attempt == 0 {
+            stem.to_owned()
+        } else {
+            format!("{stem}_quper{attempt}")
+        };
+        let target = mods.join(format!("{candidate}.{extension}"));
+        let Ok(metadata) = fs::symlink_metadata(&target) else {
+            return Ok((target, candidate));
+        };
+        if archive::ordinary_metadata(&target).is_ok()
+            && metadata.is_file()
+            && metadata.len() == package.size
+            && crate::maps::library::digest_file(&target)? == package.sha256
+        {
+            return Ok((target, candidate));
+        }
+    }
+    anyhow::bail!("Слишком много модов с именем {}", package.filename)
+}
+
+fn module(game: Game) -> &'static str {
+    match game {
+        Game::Ets2 => "/map/europe.mbd",
+        Game::Ats => "/map/usa.mbd",
+    }
+}
+
+fn new_profile(game: Game, name: &str, mods: &[String]) -> Result<Vec<u8>> {
+    let bytes = profile::create(name, module(game), mods)?;
+    Ok(if game == Game::Ats {
+        String::from_utf8(bytes)?
+            .replace("brand: scania_r", "brand: kenworth")
+            .into_bytes()
+    } else {
+        bytes
+    })
+}
+
+/// Large map combos need a bigger render buffer; an already larger value is kept.
+fn raise_buffer(config: &Path) -> Result<()> {
+    const WANTED: u32 = 30;
+    let text = match fs::read(config) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let line = regex::Regex::new(r#"(?m)^uset r_buffer_page_size "(\d+)"\s*$"#)?;
+    let updated = match line.captures(&text) {
+        Some(found) if found[1].parse::<u32>().is_ok_and(|v| v >= WANTED) => return Ok(()),
+        Some(_) => line
+            .replace(&text, format!("uset r_buffer_page_size \"{WANTED}\""))
+            .into_owned(),
+        None => format!(
+            "{text}{}uset r_buffer_page_size \"{WANTED}\"\n",
+            if text.is_empty() || text.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            }
+        ),
+    };
+    fs::write(config, updated)?;
+    Ok(())
 }
 
 fn profile_name(combo: &Combo) -> String {

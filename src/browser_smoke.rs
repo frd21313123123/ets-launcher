@@ -75,7 +75,8 @@ fn run_entry(
             ..Default::default()
         },
         Box::new(move |cc| {
-            crate::configure(&cc.egui_ctx);
+            crate::ui::install_fonts(&cc.egui_ctx);
+            crate::ui::apply_theme(&cc.egui_ctx, &crate::ui::BLACK);
             Ok(Box::new(app))
         }),
     )
@@ -181,6 +182,9 @@ impl eframe::App for Smoke {
             ui.label("Проверка WebView2…");
             if self.prepared.is_some() || self.automatic {
                 self.browser.show(ui);
+                if self.browser.challenge.is_some() && !self.root.join("challenge.txt").exists() {
+                    let _ = std::fs::write(self.root.join("challenge.txt"), &self.browser.url);
+                }
             }
         });
     }

@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 mod bundled;
 
-const MAX_FILES: usize = 30_000;
+// Large map mods are often shipped as folders with hundreds of thousands of files.
+const MAX_FILES: usize = 500_000;
 const MAX_EXPANDED: u64 = 50 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -125,7 +126,7 @@ pub fn parse_listing(text: &str) -> Result<Vec<Entry>> {
             .context("Некорректный размер архива")?;
         ensure!(
             expanded <= MAX_EXPANDED && entries.len() < MAX_FILES,
-            "Архив превышает лимит: 50 ГиБ / 30 000 записей"
+            "Архив превышает лимит: 50 ГиБ / 500 000 записей"
         );
         let key = path.to_string_lossy().replace('\\', "/").to_lowercase();
         ensure!(

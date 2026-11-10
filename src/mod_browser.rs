@@ -25,11 +25,30 @@ pub enum Event {
     PopupRequested(String),
 }
 
+/// Cloudflare's interstitial keeps the site's address; only its title tells it apart.
+pub fn is_challenge_title(title: &str) -> bool {
+    let title = title.trim().to_lowercase();
+    [
+        "just a moment",
+        "один момент",
+        "attention required",
+        "выполнение проверки",
+        "checking your browser",
+        "проверка безопасности",
+    ]
+    .iter()
+    .any(|marker| title.starts_with(marker))
+}
+
 pub struct Browser {
     #[cfg(windows)]
     view: Option<wry::WebView>,
     #[cfg(windows)]
     context: Option<wry::WebContext>,
+    #[cfg(windows)]
+    challenge_state: Arc<std::sync::Mutex<Option<bool>>>,
+    #[cfg(windows)]
+    next_challenge_check: std::time::Instant,
     pub visible: bool,
     pub title: String,
     pub url: String,
@@ -38,6 +57,10 @@ pub struct Browser {
     pending_popup: Option<String>,
     active: Arc<AtomicUsize>,
     auto_free: bool,
+    /// When a full-page check or an unfinished CAPTCHA was first observed.
+    pub challenge: Option<std::time::Instant>,
+    /// Set when the visitor sent the page to the system browser.
+    pub external_requested: bool,
 }
 
 impl Default for Browser {
@@ -47,6 +70,10 @@ impl Default for Browser {
             view: None,
             #[cfg(windows)]
             context: None,
+            #[cfg(windows)]
+            challenge_state: Default::default(),
+            #[cfg(windows)]
+            next_challenge_check: std::time::Instant::now(),
             visible: false,
             title: String::new(),
             url: String::new(),
@@ -55,6 +82,8 @@ impl Default for Browser {
             pending_popup: None,
             active: Arc::new(AtomicUsize::new(0)),
             auto_free: false,
+            challenge: None,
+            external_requested: false,
         }
     }
 }
@@ -84,7 +113,10 @@ impl Browser {
                     fields: [...f.querySelectorAll('input,button')].map(e => ({tag:e.tagName, name:e.name, type:e.type, id:e.id, disabled:e.disabled, text:e.tagName==='BUTTON'?e.textContent.trim().slice(0,100):undefined}))
                 })),
                 buttons: [...document.querySelectorAll('button,a[id],input[type="submit"]')].slice(0,100).map(e=>({tag:e.tagName,id:e.id,name:e.name,text:(e.textContent||e.value||'').trim().slice(0,100),disabled:e.disabled})),
-                captcha: !!document.querySelector('iframe[src*="captcha"], .h-captcha, .g-recaptcha')
+                captcha: !!document.querySelector('iframe[src*="captcha"], .h-captcha, .g-recaptcha'),
+                turnstile: !!document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]'),
+                turnstileSolved: [...document.querySelectorAll('input[name="cf-turnstile-response"]')].some(t => t.value.length > 20),
+                url: location.origin + location.pathname
             }))()"#, move |data| {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) { let _ = maps::write_json(&output, &value); }
             });
@@ -142,6 +174,8 @@ impl Browser {
         maps::https(url)?;
         self.title = entry.name.clone();
         self.url = url.into();
+        self.challenge = None;
+        self.external_requested = false;
         self.pending_popup = None;
         self.instructions = prepared
             .map(|p| p.message.clone())
@@ -170,9 +204,20 @@ impl Browser {
             let auto_free = self.auto_free;
             let active = self.active.clone();
             let completed_active = active.clone();
+            self.challenge_state = Default::default();
+            self.next_challenge_check = std::time::Instant::now();
+            let initialization = if auto_free {
+                // WebView2 also injects initialization scripts into subframes.
+                // Keep automation outside the CAPTCHA provider's own frames.
+                format!(
+                    "(() => {{ if (window.top !== window) return; const captchaPending = {CAPTCHA_PENDING}; {QUPER_FREE_DOWNLOAD} }})()"
+                )
+            } else {
+                String::new()
+            };
             let webview = wry::WebViewBuilder::new_with_web_context(context)
                 .with_url(url)
-                .with_initialization_script(if auto_free { QUPER_FREE_DOWNLOAD } else { "" })
+                .with_initialization_script(initialization)
                 .with_bounds(wry::Rect { position: wry::dpi::LogicalPosition::new(20.0, 170.0).into(), size: wry::dpi::LogicalSize::new(800.0, 600.0).into() })
                 .with_navigation_handler(move |url| {
                     let allowed = (url.starts_with("https://") || url == "about:blank")
@@ -257,15 +302,73 @@ impl Browser {
 
     pub fn cancel(&mut self) {
         self.hide();
+        self.challenge = None;
+        self.external_requested = false;
         #[cfg(windows)]
         {
             self.view = None;
+            self.challenge_state = Default::default();
         }
         self.active.store(0, Ordering::Relaxed);
     }
 
+    /// Use the configured browser and retain the queue's userscript marker.
+    /// Only a successful launch starts the Downloads-folder watcher.
+    pub fn open_external(&mut self) -> Result<()> {
+        maps::https(&self.url)?;
+        crate::browsers::open_url(&crate::userscript::tagged(&self.url))?;
+        self.external_requested = true;
+        Ok(())
+    }
+
+    /// Read only public check state; no native IPC bridge or response tokens
+    /// are exposed. Replacing the state on open/cancel ignores late callbacks
+    /// from the previous page's WebView.
+    fn check_challenge(&mut self) {
+        #[cfg(windows)]
+        {
+            use std::time::{Duration, Instant};
+            let taken = self
+                .challenge_state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            if let Some(pending) = taken {
+                if pending {
+                    self.challenge.get_or_insert_with(Instant::now);
+                } else {
+                    self.challenge = None;
+                }
+            }
+            if Instant::now() < self.next_challenge_check {
+                return;
+            }
+            self.next_challenge_check = Instant::now() + Duration::from_secs(1);
+            if let Some(view) = &self.view {
+                let state = self.challenge_state.clone();
+                let script = format!(
+                    "(() => {{ if (document.readyState === 'loading') return null; return {{title: document.title, pending: ({CAPTCHA_PENDING})()}}; }})()"
+                );
+                let _ = view.evaluate_script_with_callback(&script, move |data| {
+                    #[derive(serde::Deserialize)]
+                    struct Check {
+                        title: String,
+                        pending: bool,
+                    }
+                    if let Ok(check) = serde_json::from_str::<Check>(&data) {
+                        *state.lock().unwrap_or_else(|p| p.into_inner()) =
+                            Some(check.pending || is_challenge_title(&check.title));
+                    }
+                });
+            }
+        }
+    }
+
     pub fn show(&mut self, ui: &mut eframe::egui::Ui) {
         use eframe::egui;
+        self.check_challenge();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(1));
         ui.horizontal_wrapped(|ui| {
             ui.strong(&self.title);
             if ui.button("← Назад").clicked() {
@@ -293,8 +396,10 @@ impl Browser {
                     let _ = view.evaluate_script(script);
                 }
             }
-            if ui.button("Внешний браузер ↗").clicked() {
-                let _ = open::that(&self.url);
+            if ui.button("Внешний браузер ↗").clicked()
+                && let Err(error) = self.open_external()
+            {
+                self.instructions = format!("Не удалось открыть браузер: {error}");
             }
             if ui.button("Вернуться к сборкам").clicked() {
                 self.hide();
@@ -350,17 +455,53 @@ impl Browser {
     }
 }
 
+const CAPTCHA_PENDING: &str = include_str!("../assets/browser/captcha-pending.js");
+
 const QUPER_FREE_DOWNLOAD: &str = r#"
 (() => {
-    const hosts = ['sharemods.com', 'www.sharemods.com', 'modsfire.com', 'www.modsfire.com'];
-    if (!hosts.includes(location.hostname)) return;
+    const hosts = ['sharemods.com', 'www.sharemods.com', 'modsfire.com', 'www.modsfire.com', 'mods.to', 'www.mods.to'];
+    if (!hosts.includes(location.hostname)) {
+        // An author's own page: follow its first "Download" link to a file host
+        // (older versions further down are ignored). Only the top page acts.
+        if (window.top !== window) return;
+        const fileHosts = /(^|\.)(sharemods\.com|modsfire\.com|mods\.to|wdfiles\.ru|drive\.google\.com|truckymods\.io)$/;
+        let followed = false;
+        const follow = setInterval(() => {
+            if (followed || document.readyState === 'loading') return;
+            if (captchaPending()) return;
+            const link = [...document.querySelectorAll('a[href]')].find(a => {
+                if (!/^\s*(download|скачать)\b/i.test(a.textContent)) return false;
+                try {
+                    const url = new URL(a.href, location.href);
+                    return url.protocol === 'https:' && fileHosts.test(url.hostname);
+                } catch { return false; }
+            });
+            if (link) { followed = true; clearInterval(follow); location.assign(link.href); }
+        }, 1500);
+        setTimeout(() => clearInterval(follow), 60000);
+        return;
+    }
     let acted = false;
     let readyAt = null;
+    let consentDeclined = false;
+    let checkShown = false;
+    let generated = false;
     const timer = setInterval(() => {
         if (acted || document.readyState === 'loading') return;
         if (readyAt === null) readyAt = Date.now();
         const visible = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
-        if ([...document.querySelectorAll('iframe[src*="captcha"], .h-captcha, .g-recaptcha')].some(visible)) return;
+        // Cookie walls cover the page and the Cloudflare widget. They are always
+        // answered with the most private choice.
+        if (!consentDeclined) {
+            const reject = [...document.querySelectorAll('button, a[role="button"]')].find(b => visible(b) && /^(reject all|decline all|refuse all|отклонить все|отклонить)$/i.test(b.textContent.trim()));
+            if (reject) { consentDeclined = true; reject.click(); }
+        }
+        if (captchaPending()) {
+            // Keep the check in sight in case Cloudflare asks the visitor to click it.
+            const widget = document.querySelector('.cf-turnstile, .g-recaptcha, .h-captcha, iframe[src*="challenges.cloudflare.com"], iframe[src*="/recaptcha/"], iframe[src*="hcaptcha.com"]');
+            if (!checkShown && widget) { checkShown = true; widget.scrollIntoView({ block: 'center' }); }
+            return;
+        }
         const direct = document.querySelector('a#downloadnow[href], a#downloadbtn[href], a#download_link[href]') || [...document.querySelectorAll('a[href]')].find(a => /^start download(?:\s|$)/i.test(a.textContent.trim()));
         if (direct) {
             const url = new URL(direct.href, location.href);
@@ -378,18 +519,88 @@ const QUPER_FREE_DOWNLOAD: &str = r#"
             if (!form || form.querySelector('input[type="password"], input[name="captcha"]')) return;
             const target = new URL(form.getAttribute('action') || location.href, location.href);
             if (target.origin !== location.origin) return;
-            const button = form.querySelector('button[name="method_free"], input[name="method_free"]') || [...form.querySelectorAll('button, input[type="submit"]')].find(b => {
+            // `method_free` is often a hidden field: clicking it does nothing, so
+            // only real submit controls are considered.
+            const button = form.querySelector('button[name="method_free"], input[type="submit"][name="method_free"]') || [...form.querySelectorAll('button, input[type="submit"]')].find(b => {
                 const label = (b.value || b.textContent).trim().replace(/\s+/g, ' ');
                 return !/premium|paid/i.test(label) && /^(create download link|free download|start download|download)(?:\s|$)/i.test(label);
             });
             if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
                 acted = true; clearInterval(timer); button.click();
             }
+        } else if (location.hostname.includes('mods.to')) {
+            const button = [...document.querySelectorAll('button, a[href]')].find(b => /^start now$/i.test(b.textContent.trim()));
+            if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+                acted = true; clearInterval(timer); button.click();
+            }
         } else {
-            const button = [...document.querySelectorAll('a[href], button')].find(b => /^generate\s+(download\s+)?link$/i.test(b.textContent.trim()));
-            if (button && !button.disabled) { acted = true; clearInterval(timer); button.click(); }
+            // ModsFire removes the button's href, "generates" for a few seconds and
+            // then turns it into a "Download Link" leading to the next step.
+            const ready = [...document.querySelectorAll('a.download-button[href]')].find(a => /^download link$/i.test(a.textContent.trim()));
+            if (ready) {
+                const url = new URL(ready.getAttribute('href'), location.href);
+                if (url.origin === location.origin) { acted = true; clearInterval(timer); location.assign(url.href); }
+                return;
+            }
+            if (!generated) {
+                const button = [...document.querySelectorAll('a, button')].find(b => /^generate\s+(download\s+)?link$/i.test(b.textContent.trim()));
+                if (button && !button.disabled) { generated = true; button.click(); }
+            }
         }
     }, 1500);
-    setTimeout(() => clearInterval(timer), 180000);
+    setTimeout(() => clearInterval(timer), 600000);
 })();
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::{Browser, is_challenge_title};
+
+    #[test]
+    fn cloudflare_check_pages_are_recognised_by_title() {
+        assert!(is_challenge_title("Just a moment..."));
+        assert!(is_challenge_title("Один момент…"));
+        assert!(is_challenge_title("Attention Required! | Cloudflare"));
+        assert!(!is_challenge_title(
+            "Download file Koromyslovo Add-on for Project Russia 1.5.scs - ModsFire.com"
+        ));
+        assert!(!is_challenge_title(""));
+    }
+
+    #[test]
+    fn invalid_handoff_does_not_start_watching_downloads() {
+        let mut browser = Browser {
+            url: "about:blank".into(),
+            ..Default::default()
+        };
+        assert!(browser.open_external().is_err());
+        assert!(!browser.external_requested);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn check_lifecycle_ignores_late_callbacks_from_a_cancelled_view() {
+        use std::time::{Duration, Instant};
+        let mut browser = Browser {
+            next_challenge_check: Instant::now() + Duration::from_secs(60),
+            ..Default::default()
+        };
+        *browser.challenge_state.lock().unwrap() = Some(true);
+        browser.check_challenge();
+        let since = browser.challenge.unwrap();
+        *browser.challenge_state.lock().unwrap() = Some(true);
+        browser.check_challenge();
+        assert_eq!(browser.challenge, Some(since));
+        *browser.challenge_state.lock().unwrap() = Some(false);
+        browser.check_challenge();
+        assert!(browser.challenge.is_none());
+
+        let old_check = browser.challenge_state.clone();
+        browser.external_requested = true;
+        browser.cancel();
+        *old_check.lock().unwrap() = Some(true);
+        browser.check_challenge();
+        assert!(browser.challenge.is_none());
+        assert!(!browser.external_requested);
+    }
+}
